@@ -135,7 +135,7 @@ namespace DevTxt.Metla
             for (int i = 0; i < w.Cats.Count; i++)
             {
                 Category c = w.Cats[i];
-                if (i > 0) list.Children.Add(new Border { Height = 1, Background = Ui.Solid(Tokens.Dark.Separator) });
+                if (i > 0) list.Children.Add(new Border { Height = 1, Background = Ui.Separator });
                 var line = new DockPanel { LastChildFill = true, Height = 27 };
                 var size = Ui.T(!w.Scanned || c.NeedsAdmin ? "—" : Fmt.Size(c.Bytes), Tokens.Size.Body, c.Chosen ? Ui.Label : Ui.Label2, c.Chosen ? FontWeights.SemiBold : FontWeights.Normal);
                 size.Width = 86; size.TextAlignment = TextAlignment.Right; size.VerticalAlignment = VerticalAlignment.Center;
@@ -229,7 +229,7 @@ namespace DevTxt.Metla
 
                 // Самые большие — чтобы было видно, что это за файлы
                 var items = new StackPanel { Margin = new Thickness(20, 8, 0, 0) };
-                items.Children.Add(new Border { Height = 1, Background = Ui.Solid(Tokens.Dark.Separator), Margin = new Thickness(0, 0, 0, 6) });
+                items.Children.Add(new Border { Height = 1, Background = Ui.Separator, Margin = new Thickness(0, 0, 0, 6) });
                 foreach (Item it in c.Top)
                 {
                     var line = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 2, 0, 2) };

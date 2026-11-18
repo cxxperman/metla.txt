@@ -260,7 +260,7 @@ namespace DevTxt.Metla
                 if (c.IsRecycle) recycle = true; else anyPermanent = true;
                 body.Children.Add(SheetLine(c.Title, c.IsRecycle ? Fmt.Plural(c.Count, "объект", "объекта", "объектов") : Fmt.Files(c.Count), Fmt.Size(c.Bytes), false));
             }
-            body.Children.Add(new Border { Height = 1, Background = Ui.Solid(Tokens.Dark.Separator), Margin = new Thickness(0, 8, 0, 8) });
+            body.Children.Add(new Border { Height = 1, Background = Ui.Separator, Margin = new Thickness(0, 8, 0, 8) });
             body.Children.Add(SheetLine("Всего", Fmt.Plural(files, "объект", "объекта", "объектов"), Fmt.Size(total), true));
             string warn = "";
             if (anyPermanent) warn += "Временные файлы и кэши удаляются сразу и навсегда, мимо корзины. ";
@@ -329,8 +329,8 @@ namespace DevTxt.Metla
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 18, 0, 0), Children = { no.Root, yes.Root } };
             var glass = Ui.Block(new StackPanel { Children = { head, body, buttons } }, false);
             glass.Padding = new Thickness(22, 20, 22, 18);
-            var card = new Border { Width = 520, CornerRadius = new CornerRadius(Tokens.Radius.Block), Background = Ui.Solid(Tokens.Dark.Surface), Child = glass, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-            var dim = new Border { Background = Ui.Solid(Ui.Alpha(Tokens.Dark.Bg, 0.62)) };
+            var card = new Border { Width = 520, CornerRadius = new CornerRadius(Tokens.Radius.Block), Background = Ui.Light ? Ui.Solid(Tokens.Light.Raised) : Ui.Solid(Tokens.Dark.Surface), Child = glass, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };   // audit:ok — цвет выбран по теме
+            var dim = new Border { Background = Ui.Solid(Ui.Alpha(Colors.Black, 0.4)) };   // «дымка» Windows 11 под диалогом — всегда полупрозрачный чёрный
             dim.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; };   // щелчок мимо листа ничего не делает
             sheetLayer.Children.Clear();
             sheetLayer.Children.Add(dim);
@@ -460,7 +460,7 @@ namespace DevTxt.Metla
             {
                 using (var g = System.Drawing.Graphics.FromImage(bmp))
                 using (var orange = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(body.R, body.G, body.B)))
-                using (var eye = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(Tokens.Dark.Bg.R, Tokens.Dark.Bg.G, Tokens.Dark.Bg.B)))
+                using (var eye = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(Tokens.Dark.Bg.R, Tokens.Dark.Bg.G, Tokens.Dark.Bg.B)))   // audit:ok — глаз значка в трее всегда тёмный
                     for (int y = 0; y < rows; y++)
                         for (int x = 0; x < cols; x++)
                             if (Sprite[y][x] != '.') g.FillRectangle(Sprite[y][x] == 'E' ? eye : orange, ox + x * cell, oy + y * cell, cell, cell);
