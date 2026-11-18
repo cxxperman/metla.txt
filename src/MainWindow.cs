@@ -37,6 +37,7 @@ namespace DevTxt.Metla
 
         readonly TextBlock footer = Ui.T("", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
         readonly Btn mainBtn = new Btn(), secondBtn = new Btn();
+        readonly TextBlock coreLink = Ui.T("", Tokens.Size.Caption, Ui.Label2, FontWeights.Normal);
         readonly Grid sheetLayer = new Grid { Visibility = Visibility.Collapsed };
         readonly DispatcherTimer daily = new DispatcherTimer { Interval = TimeSpan.FromMinutes(30) };
         OverviewPage overview;
@@ -136,6 +137,14 @@ namespace DevTxt.Metla
             secondBtn.Root.Margin = new Thickness(0, 0, 8, 0);
             DockPanel.SetDock(secondBtn.Root, Dock.Right);
             bar.Children.Add(secondBtn.Root);
+            // Дорога к core.txt: тихая ссылка — открыть, а если его нет — скачать
+            coreLink.VerticalAlignment = VerticalAlignment.Center; coreLink.Margin = new Thickness(0, 0, 16, 0);
+            coreLink.Cursor = Cursors.Hand; coreLink.Background = Brushes.Transparent; coreLink.ToolTip = CoreApp.Pitch;
+            coreLink.MouseEnter += delegate { coreLink.Foreground = Ui.Label; };
+            coreLink.MouseLeave += delegate { coreLink.Foreground = Ui.Label2; };
+            coreLink.MouseLeftButtonUp += delegate { if (!DemoMode) CoreApp.Go(AppHub.Online, AppHub.ShowCore); };
+            DockPanel.SetDock(coreLink, Dock.Right);
+            bar.Children.Add(coreLink);
             footer.VerticalAlignment = VerticalAlignment.Center;
             footer.Margin = new Thickness(0, 0, 16, 0);
             bar.Children.Add(footer);
@@ -196,7 +205,8 @@ namespace DevTxt.Metla
             else if (Last != null) line = "Освобождено " + Fmt.Size(Last.Freed) + " · удалено: " + Fmt.Count(Last.Deleted) + (Last.Skipped + Last.Refused > 0 ? " · пропущено: " + Fmt.Count(Last.Skipped + Last.Refused) + " (заняты или нет доступа)" : "");
             else if (Scanned) line = "Проверено в " + ScanAt.ToLocalTime().ToString("HH:mm") + " · выбрано " + Fmt.Size(chosen);
             else line = "Проверка только смотрит и ничего не удаляет";
-            footer.Text = line + " · версия " + Program.VersionText + " · dev.txt™";
+            Motion.Swap(footer, line + " · версия " + Program.VersionText + " · dev.txt™");
+            coreLink.Text = CoreApp.Label(DemoMode || AppHub.Online);
             footer.Foreground = Notice != null ? Ui.Solid(Tokens.Palette.Red) : Ui.Label3;
 
             if (page == PStartup) { secondBtn.Hide(); mainBtn.Set("Обновить список", null, !loadingStartup, LoadStartup); }
@@ -430,6 +440,9 @@ namespace DevTxt.Metla
                 {
                     var menu = new System.Windows.Forms.ContextMenuStrip();
                     menu.Items.Add("Открыть metla.txt", null, delegate { ShowWindow(); });
+                    var coreItem = new System.Windows.Forms.ToolStripMenuItem("core.txt", null, delegate { CoreApp.Go(AppHub.Online, AppHub.ShowCore); });
+                    menu.Items.Add(coreItem);
+                    menu.Opening += delegate { coreItem.Text = CoreApp.Label(AppHub.Online); };
                     menu.Items.Add("Выход", null, delegate { quitting = true; Close(); });
                     tray = new System.Windows.Forms.NotifyIcon { Icon = TrayIcon(), Text = "metla.txt", ContextMenuStrip = menu, Visible = true };
                     tray.MouseClick += delegate(object s, System.Windows.Forms.MouseEventArgs e) { if (e.Button == System.Windows.Forms.MouseButtons.Left) ShowWindow(); };

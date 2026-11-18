@@ -22,6 +22,8 @@ namespace DevTxt.Metla
         public static Action Show;                  // показать окно: команда «show» от другого приложения
         public static event Action StatusChanged;   // связь появилась или пропала; вызывается в потоке окна
         public static bool Online { get { return link != null && link.Online; } }
+        // Просьба к core.txt показать своё окно
+        public static void ShowCore() { if (link != null) link.Command("core", "show", null); }
 
         // Для проверок: хаб на другом порту, рядом с настоящим core.txt
         public static int TestPort
