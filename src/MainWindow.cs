@@ -60,8 +60,9 @@ namespace DevTxt.Metla
             page = startPage;
             Title = Program.Id + ".txt";
             Width = W; Height = H;
-            WindowStyle = WindowStyle.None;
-            ResizeMode = ResizeMode.CanMinimize;
+            // Родное окно Windows 11: системная рамка и тень, Mica, тема Windows, прилипание к краям экрана
+            Ui.ThemeFollows = !demo;
+            Ui.Native(this, false);
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = Ui.Bg;
             FontFamily = Ui.TextFont;
@@ -76,13 +77,6 @@ namespace DevTxt.Metla
             if (demo) Demo.Fill(this); else ReadDisk();
             ShowPage(page);
 
-            SourceInitialized += delegate
-            {
-                IntPtr hwnd = new WindowInteropHelper(this).Handle;
-                int round = 2, dark = 1;   // скруглённые углы и тёмная рамка окна в Windows 11
-                DwmSetWindowAttribute(hwnd, 33, ref round, sizeof(int));
-                DwmSetWindowAttribute(hwnd, 20, ref dark, sizeof(int));
-            };
             Loaded += delegate { Enter(); };
             KeyDown += delegate(object s, KeyEventArgs e) { if (e.Key == Key.Escape && sheetLayer.Visibility == Visibility.Visible) CloseSheet(); };
             if (demo) return;
@@ -121,10 +115,7 @@ namespace DevTxt.Metla
             tabs.Root.Margin = new Thickness(0, 24, 32, 0);
             header.Children.Add(tabs.Root);
 
-            var controls = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 6, 8, 0) };
-            controls.Children.Add(WindowButton("", "Свернуть", false, delegate { WindowState = WindowState.Minimized; }));
-            controls.Children.Add(WindowButton("", "Закрыть", true, delegate { Close(); }));
-            header.Children.Add(controls);
+            header.Children.Add(Ui.CaptionButtons(this, Close));   // кнопки окна как у Windows 11
             DockPanel.SetDock(header, Dock.Top);
             layout.Children.Add(header);
 
@@ -438,13 +429,15 @@ namespace DevTxt.Metla
             {
                 try
                 {
-                    var menu = new System.Windows.Forms.ContextMenuStrip();
-                    menu.Items.Add("Открыть metla.txt", null, delegate { ShowWindow(); });
-                    var coreItem = new System.Windows.Forms.ToolStripMenuItem("core.txt", null, delegate { CoreApp.Go(AppHub.Online, AppHub.ShowCore); });
-                    menu.Items.Add(coreItem);
-                    menu.Opening += delegate { coreItem.Text = CoreApp.Label(AppHub.Online); };
-                    menu.Items.Add("Выход", null, delegate { quitting = true; Close(); });
-                    tray = new System.Windows.Forms.NotifyIcon { Icon = TrayIcon(), Text = "metla.txt", ContextMenuStrip = menu, Visible = true };
+                    tray = new System.Windows.Forms.NotifyIcon { Icon = TrayIcon(), Text = "metla.txt", Visible = true };
+                    // Меню Windows 11, а не серое меню WinForms
+                    tray.MouseUp += delegate(object s, System.Windows.Forms.MouseEventArgs e)
+                    {
+                        if (e.Button != System.Windows.Forms.MouseButtons.Right) return;
+                        NativeMenu.Show(new NativeMenu.Item("Открыть metla.txt", ShowWindow),
+                            new NativeMenu.Item(CoreApp.Label(AppHub.Online), delegate { CoreApp.Go(AppHub.Online, AppHub.ShowCore); }),
+                            NativeMenu.Item.Separator, new NativeMenu.Item("Выход", delegate { quitting = true; Close(); }));
+                    };
                     tray.MouseClick += delegate(object s, System.Windows.Forms.MouseEventArgs e) { if (e.Button == System.Windows.Forms.MouseButtons.Left) ShowWindow(); };
                     tray.BalloonTipClicked += delegate { ShowWindow(); };
                 }
