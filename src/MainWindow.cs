@@ -17,7 +17,7 @@ namespace DevTxt.Metla
 {
     class MainWindow : Window
     {
-        const double W = 920, H = 640;
+        const double W = 1120, H = 720;
         internal const int POverview = 0, PClean = 1, PStartup = 2, PPrograms = 3;
         internal const long RemindBytes = 5 * Fmt.GB;
         // Значок metla.txt — метла: черенок, головка с глазами, прутья. Тот же рисунок — в sprite.json.
@@ -44,7 +44,14 @@ namespace DevTxt.Metla
         CleanPage clean;
         StartupPage startup;
         ProgramsPage programs;
-        Seg tabs;
+        NavShell shell;   // общий каркас окна dev.txt
+        static readonly string[][] Titles =
+        {
+            new string[] { "Обзор", "Сколько места можно освободить и что занимает диск" },
+            new string[] { "Очистка", "Выберите, что убрать. Удаляется только после подтверждения" },
+            new string[] { "Автозапуск", "Программы, которые запускаются вместе с Windows" },
+            new string[] { "Программы", "Установленные программы и сколько они занимают" }
+        };
         int page;
         bool quitting, loadingStartup, loadingProgs;
         System.Windows.Forms.NotifyIcon tray;
@@ -96,55 +103,38 @@ namespace DevTxt.Metla
         // ───────── Разметка ─────────
         FrameworkElement Build()
         {
-            var root = new Grid { Background = Ui.Bg, Width = W, Height = H, ClipToBounds = true };
-            root.Children.Add(Ui.Backdrop());
-            var layout = new DockPanel { LastChildFill = true };
-            root.Children.Add(layout);
-
-            // Шапка: за неё окно перетаскивается
-            var header = new Grid { Height = 92, Background = Brushes.Transparent };
-            header.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { if (e.ButtonState == MouseButtonState.Pressed) try { DragMove(); } catch { } };
-            var mark = Ui.Sprite(Sprite, 40);
-            mark.VerticalAlignment = VerticalAlignment.Center;
-            var title = Ui.Brand(Program.Id, Tokens.Size.Display, FontWeights.Bold);
-            title.Margin = new Thickness(10, 0, 0, 2); title.VerticalAlignment = VerticalAlignment.Center;
-            header.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(32, 22, 0, 0), VerticalAlignment = VerticalAlignment.Center, Children = { mark, title } });
-
-            tabs = new Seg(new string[] { "Обзор", "Очистка", "Автозапуск", "Программы" }, page, delegate(int i) { ShowPage(i); });
-            tabs.Root.HorizontalAlignment = HorizontalAlignment.Right; tabs.Root.VerticalAlignment = VerticalAlignment.Center;
-            tabs.Root.Margin = new Thickness(0, 24, 32, 0);
-            header.Children.Add(tabs.Root);
-
-            header.Children.Add(Ui.CaptionButtons(this, Close));   // кнопки окна как у Windows 11
-            DockPanel.SetDock(header, Dock.Top);
-            layout.Children.Add(header);
+            // Общий каркас dev.txt: слева значок, имя и разделы, справа заголовок, страница и нижняя строка
+            shell = new NavShell(this, Sprite, Program.Id, "версия " + Program.VersionText, Close);
+            shell.Add("Обзор", Ui.Glyph("\uE80F"));
+            shell.Add("Очистка", Ui.Glyph("\uE74D"));
+            shell.Add("Автозапуск", Ui.Glyph("\uE7E8"));
+            shell.Add("Программы", Ui.Glyph("\uE71D"));
+            shell.Changed = delegate(int i) { ShowPage(i); };
 
             // Низ: строка состояния и кнопки
-            var bar = new DockPanel { Height = 64, Margin = new Thickness(32, 0, 32, 6) };
             mainBtn.Root.VerticalAlignment = VerticalAlignment.Center;
             DockPanel.SetDock(mainBtn.Root, Dock.Right);
-            bar.Children.Add(mainBtn.Root);
+            shell.Bottom.Children.Add(mainBtn.Root);
             secondBtn.Root.VerticalAlignment = VerticalAlignment.Center;
             secondBtn.Root.Margin = new Thickness(0, 0, 8, 0);
             DockPanel.SetDock(secondBtn.Root, Dock.Right);
-            bar.Children.Add(secondBtn.Root);
-            // Дорога к core.txt: тихая ссылка — открыть, а если его нет — скачать
-            coreLink.VerticalAlignment = VerticalAlignment.Center; coreLink.Margin = new Thickness(0, 0, 16, 0);
+            shell.Bottom.Children.Add(secondBtn.Root);
+            // Дорога к core.txt: тихая ссылка внизу слева, под разделами — открыть, а если его нет — скачать
             coreLink.Cursor = Cursors.Hand; coreLink.Background = Brushes.Transparent; coreLink.ToolTip = CoreApp.Pitch;
+            coreLink.Margin = new Thickness(20, 0, 20, 18);
             coreLink.MouseEnter += delegate { coreLink.Foreground = Ui.Label; };
             coreLink.MouseLeave += delegate { coreLink.Foreground = Ui.Label2; };
             coreLink.MouseLeftButtonUp += delegate { if (!DemoMode) CoreApp.Go(AppHub.Online, AppHub.ShowCore); };
-            DockPanel.SetDock(coreLink, Dock.Right);
-            bar.Children.Add(coreLink);
+            var pane = (DockPanel)shell.Status.Parent;
+            DockPanel.SetDock(coreLink, Dock.Bottom);
+            pane.Children.Insert(pane.Children.IndexOf(shell.Status), coreLink);
             footer.VerticalAlignment = VerticalAlignment.Center;
-            footer.Margin = new Thickness(0, 0, 16, 0);
-            bar.Children.Add(footer);
-            DockPanel.SetDock(bar, Dock.Bottom);
-            layout.Children.Add(bar);
+            footer.TextWrapping = TextWrapping.Wrap; footer.Margin = new Thickness(0, 0, 16, 0);
+            shell.Bottom.Children.Add(footer);
 
-            layout.Children.Add(new Grid { Children = { overview.Root, clean.Root, startup.Root, programs.Root } });
-            root.Children.Add(sheetLayer);
-            return root;
+            foreach (FrameworkElement p in new FrameworkElement[] { overview.Root, clean.Root, startup.Root, programs.Root }) shell.Body.Children.Add(p);
+            shell.Root.Children.Add(sheetLayer);   // лист подтверждения — поверх всего окна
+            return shell.Root;
         }
 
         FrameworkElement WindowButton(string glyph, string tip, bool danger, Action click)
@@ -160,7 +150,8 @@ namespace DevTxt.Metla
         internal void ShowPage(int i)
         {
             page = i;
-            tabs.Index = i;
+            shell.Selected = i;
+            shell.Title(Titles[i][0], Titles[i][1]);
             overview.Root.Visibility = i == POverview ? Visibility.Visible : Visibility.Collapsed;
             clean.Root.Visibility = i == PClean ? Visibility.Visible : Visibility.Collapsed;
             startup.Root.Visibility = i == PStartup ? Visibility.Visible : Visibility.Collapsed;
@@ -176,6 +167,7 @@ namespace DevTxt.Metla
         {
             if (!IsVisible) return;
             Page p = page == POverview ? (Page)overview : page == PClean ? (Page)clean : page == PStartup ? (Page)startup : programs;
+            Motion.Enter(p.Root);   // страница поднимается снизу, как в «Параметрах» Windows 11
             Motion.Stagger(p.Entrance);
         }
 
