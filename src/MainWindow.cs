@@ -426,9 +426,13 @@ namespace DevTxt.Metla
                     tray.MouseUp += delegate(object s, System.Windows.Forms.MouseEventArgs e)
                     {
                         if (e.Button != System.Windows.Forms.MouseButtons.Right) return;
-                        NativeMenu.Show(new NativeMenu.Item("Открыть metla.txt", ShowWindow),
-                            new NativeMenu.Item(CoreApp.Label(AppHub.Online), delegate { CoreApp.Go(AppHub.Online, AppHub.ShowCore); }),
-                            NativeMenu.Item.Separator, new NativeMenu.Item("Выход", delegate { quitting = true; Close(); }));
+                        var menu = new PopMenu();
+                        menu.Brand(Sprite, Program.Id);
+                        menu.Item("Открыть metla.txt", false, ShowWindow);
+                        menu.Item(CoreApp.Label(AppHub.Online), false, delegate { CoreApp.Go(AppHub.Online, AppHub.ShowCore); });
+                        menu.Line();
+                        menu.Item("Выход", false, delegate { quitting = true; Close(); });
+                        menu.ShowAtCursor();
                     };
                     tray.MouseClick += delegate(object s, System.Windows.Forms.MouseEventArgs e) { if (e.Button == System.Windows.Forms.MouseButtons.Left) ShowWindow(); };
                     tray.BalloonTipClicked += delegate { ShowWindow(); };
