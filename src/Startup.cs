@@ -40,6 +40,8 @@ namespace DevTxt.Metla
     class StartupEntry
     {
         public string Name, Command, Exe, Publisher;
+        public string Description;    // FileDescription из файла программы — понятнее, чем имя значения в реестре
+        public System.Windows.Media.ImageSource Icon;   // значок из файла; достаётся в фоне вместе со списком
         public bool Enabled = true;
         public bool Editable;         // запись этого пользователя — её можно отключить
         public bool Folder;           // из папки «Автозагрузка» (иначе — из реестра)
@@ -76,6 +78,7 @@ namespace DevTxt.Metla
                 if (string.IsNullOrEmpty(e.Exe) || !File.Exists(e.Exe)) return;
                 FileVersionInfo v = FileVersionInfo.GetVersionInfo(e.Exe);
                 if (!string.IsNullOrEmpty(v.CompanyName)) e.Publisher = v.CompanyName.Trim();
+                if (!string.IsNullOrEmpty(v.FileDescription) && v.FileDescription.Trim().Length > 0) e.Description = v.FileDescription.Trim();
             }
             catch { }
         }
@@ -163,6 +166,8 @@ namespace DevTxt.Metla
     class Prog
     {
         public string Name, Publisher, Version, Uninstall;
+        public string IconPath;          // DisplayIcon из реестра: файл значка (без «,номер»); null — не указан
+        public System.Windows.Media.ImageSource Icon;   // достаётся в фоне после списка
         public long Bytes = -1;          // −1 — размер неизвестен
         public DateTime? Installed;
     }
@@ -196,7 +201,7 @@ namespace DevTxt.Metla
             string release = Str(v, "ReleaseType") ?? "";
             if (release == "Update" || release == "Hotfix" || release == "Security Update" || release == "Update Rollup" || release == "Service Pack") return null;
 
-            var p = new Prog { Name = name, Publisher = Str(v, "Publisher"), Version = Str(v, "DisplayVersion"), Uninstall = uninstall };
+            var p = new Prog { Name = name, Publisher = Str(v, "Publisher"), Version = Str(v, "DisplayVersion"), Uninstall = uninstall, IconPath = IconFile(Str(v, "DisplayIcon")) };
             // Программы на установщике Windows удаляет он сам: «/I{код}» открыл бы «изменить», поэтому, как и «Параметры», просим «/X»
             if (Num(v, "WindowsInstaller") == 1)
             {
@@ -209,6 +214,18 @@ namespace DevTxt.Metla
             DateTime d;
             if (date != null && DateTime.TryParseExact(date, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) p.Installed = d;
             return p;
+        }
+
+        // DisplayIcon → путь к файлу: «"C:Appapp.exe",0» → C:Appapp.exe
+        public static string IconFile(string display)
+        {
+            if (display == null) return null;
+            string s = display.Trim();
+            int comma = s.LastIndexOf(',');
+            int n;
+            if (comma > 0 && int.TryParse(s.Substring(comma + 1).Trim(), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out n)) s = s.Substring(0, comma);
+            s = s.Trim().Trim('"').Trim();
+            return s.Length == 0 ? null : s;
         }
 
         // Строка запуска → программа и её параметры
@@ -274,7 +291,11 @@ namespace DevTxt.Metla
             return list;
         }
 
-        public static List<Prog> View(List<Prog> all, string search, bool byDate)
+        public const int BySize = 0, ByDate = 1, ByName = 2;
+
+        public static List<Prog> View(List<Prog> all, string search, bool byDate) { return View(all, search, byDate ? ByDate : BySize); }
+
+        public static List<Prog> View(List<Prog> all, string search, int order)
         {
             var list = new List<Prog>();
             string q = (search ?? "").Trim();
@@ -282,7 +303,7 @@ namespace DevTxt.Metla
                 if (q.Length == 0 || p.Name.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0 || (p.Publisher != null && p.Publisher.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0)) list.Add(p);
             list.Sort(delegate(Prog a, Prog b)
             {
-                int c = byDate ? (b.Installed ?? DateTime.MinValue).CompareTo(a.Installed ?? DateTime.MinValue) : b.Bytes.CompareTo(a.Bytes);
+                int c = order == ByName ? 0 : order == ByDate ? (b.Installed ?? DateTime.MinValue).CompareTo(a.Installed ?? DateTime.MinValue) : b.Bytes.CompareTo(a.Bytes);
                 return c != 0 ? c : string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase);
             });
             return list;

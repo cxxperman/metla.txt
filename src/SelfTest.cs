@@ -257,6 +257,32 @@ namespace DevTxt.Metla
                 // Вторая проверка после очистки: осталось только то, что пропущено
                 Scanner.ScanAll(cats, env, null);
                 Check(cTemp.Count == 2 && cDumps.Count == 0 && cThumbs.Count == 0 && cBrowsers.Count == 0 && cWin.Count == 0, "a scan after the clean finds only the skipped files, temp " + cTemp.Count);
+
+                // Снимок выбора: чистится ровно то, что было выбрано, когда открылся вопрос.
+                // Категория, включённая после снимка, не очищается; «только для сведения» не очищается, даже если попала в снимок.
+                Make(T + "late.tmp", 111, 3);
+                Make(L + @"CrashDumps\late.dmp", 222, 3);
+                List<Category> shown = Scanner.ScanFresh(cats, env, null);
+                Category sTemp = Scanner.Find(shown, "temp"), sDumps = Scanner.Find(shown, "dumps"), sDown = Scanner.Find(shown, "downloads");
+                Check(shown != cats && sTemp != cTemp && sTemp.On == cTemp.On && cDumps.Count == 0, "a fresh scan makes new categories, keeps the selection and leaves the old list alone");
+                Check(sTemp.Count == 3 && sDumps.Count == 1, "the fresh scan sees the new files, temp " + sTemp.Count + ", dumps " + sDumps.Count);
+                foreach (Category c in shown) c.On = false;
+                sDumps.On = true;
+                HashSet<string> snapshot = Scanner.Snapshot(shown);
+                Check(snapshot.Count == 1 && snapshot.Contains("dumps"), "the snapshot holds exactly the chosen categories");
+                sTemp.On = true;              // включили уже после вопроса
+                sDown.On = true;
+                snapshot.Add("downloads");    // даже так загрузки не удаляются
+                long seen = -1, of = -1;
+                CleanResult late = Cleaner.Clean(shown, snapshot, env, delegate(long done, long total) { seen = done; of = total; });
+                Check(!Has(L + @"CrashDumps\late.dmp"), "the category from the snapshot is cleaned");
+                Check(Has(T + "late.tmp"), "a category switched on after the snapshot is not cleaned: late.tmp survives");
+                Check(Has(@"user\Downloads\ancient.zip"), "downloads survive even when forced into the snapshot");
+                Check(late.Deleted == 1 && late.Freed == 222 && late.Skipped == 0, "the snapshot clean deleted exactly one file: " + late.Deleted + " / " + late.Freed);
+                Check(late.Parts.Count == 1 && late.Parts[0].Id == "dumps" && late.Parts[0].Deleted == 1 && late.Parts[0].Freed == 222, "the result is broken down by category");
+                Check(seen == 1 && of == 1, "progress reports files done of total: " + seen + " / " + of);
+                sDumps.On = false;            // выключили после вопроса — снимок всё равно прежний, но чистить уже нечего
+                Check(Cleaner.Clean(shown, new HashSet<string>(), env, null).Deleted == 0 && Has(T + "late.tmp"), "an empty snapshot cleans nothing");
             }
             finally
             {

@@ -10,6 +10,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
@@ -25,7 +26,10 @@ namespace DevTxt.Metla
 
         internal readonly bool DemoMode;
         internal List<Category> Cats = Scanner.Categories();
+        internal int CatsVersion;                  // растёт, когда список категорий подменён или пересчитан: по нему страницы узнают о новых данных
         internal bool Scanned, Busy;
+        internal bool Cleaning;                    // сейчас идёт удаление: ход известен точно (CleanDone из CleanTotal)
+        internal long CleanDone, CleanTotal;
         internal string BusyText;
         internal DateTime ScanAt;
         internal CleanResult Last;                 // итог последней очистки — для строки состояния
@@ -33,7 +37,8 @@ namespace DevTxt.Metla
         internal string DiskName = "C:";
         internal List<StartupEntry> StartupItems;  // null — ещё не читали
         internal List<Prog> Progs;
-        internal string Notice;                    // последняя ошибка — показывается в строке состояния
+        internal string Notice;                    // последняя ошибка — показывается в строке состояния до следующего удачного действия
+        internal bool LoadingStartup, LoadingProgs;
 
         readonly TextBlock footer = Ui.T("", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
         readonly Btn mainBtn = new Btn(), secondBtn = new Btn();
@@ -53,11 +58,15 @@ namespace DevTxt.Metla
             new string[] { "Программы", "Установленные программы и сколько они занимают" }
         };
         int page;
-        bool quitting, loadingStartup, loadingProgs;
+        bool quitting, firstScanDone, sheetOpen;
+        int sheetToken;               // номер открытого листа: по нему отложенное закрытие узнаёт, что лист уже другой
+        Btn sheetCancel;
+        FrameworkElement sheetCard;
+        IInputElement sheetReturn;    // куда вернуть фокус после листа
+        Prog pendingUninstall;        // программа, для которой запущено удаление: список обновится, когда вы вернётесь в окно
+        DateTime pendingSince;        // когда его запустили: через четверть часа ждать перестаём
         System.Windows.Forms.NotifyIcon tray;
 
-        [DllImport("dwmapi.dll")]
-        static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
         [DllImport("user32.dll")]
         static extern bool DestroyIcon(IntPtr icon);
 
@@ -66,10 +75,13 @@ namespace DevTxt.Metla
             DemoMode = demo;
             page = startPage;
             Title = Program.Id + ".txt";
-            Width = W; Height = H;
+            // Окно меняет размер; начальный размер не больше рабочей области экрана
+            Rect work = SystemParameters.WorkArea;
+            MinWidth = Math.Min(900, work.Width); MinHeight = Math.Min(560, work.Height);
+            Width = Math.Max(MinWidth, Math.Min(W, work.Width)); Height = Math.Max(MinHeight, Math.Min(H, work.Height));
             // Родное окно Windows 11: системная рамка и тень, Mica, тема Windows, прилипание к краям экрана
             Ui.ThemeFollows = !demo;
-            Ui.Native(this, false);
+            Ui.Native(this, true);
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = Ui.Bg;
             FontFamily = Ui.TextFont;
@@ -85,8 +97,33 @@ namespace DevTxt.Metla
             ShowPage(page);
 
             Loaded += delegate { Enter(); };
-            KeyDown += delegate(object s, KeyEventArgs e) { if (e.Key == Key.Escape && sheetLayer.Visibility == Visibility.Visible) CloseSheet(); };
+            // Пока открыт лист: Esc отменяет, а фокус с клавиатуры не уходит за его пределы
+            PreviewKeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (!sheetOpen) return;
+                if (e.Key == Key.Escape) { e.Handled = true; CloseSheet(); return; }
+                if (sheetCard != null && !sheetCard.IsKeyboardFocusWithin && sheetCancel != null)
+                {
+                    Keyboard.Focus(sheetCancel.Root);
+                    if (e.Key == Key.Tab || e.Key == Key.Enter || e.Key == Key.Space) e.Handled = true;
+                }
+            };
             if (demo) return;
+
+            // Первый показ окна: сразу начинается проверка — она только читает
+            ContentRendered += delegate
+            {
+                if (firstScanDone) return;
+                firstScanDone = true;
+                if (!Scanned && !Busy) StartScan();
+            };
+            // Вернулись в окно после запуска программы удаления — список программ перечитывается
+            Activated += delegate
+            {
+                if (pendingUninstall == null || LoadingProgs || sheetOpen) return;
+                if (DateTime.UtcNow - pendingSince > TimeSpan.FromMinutes(15)) { pendingUninstall = null; return; }   // удаление отменили — хватит перечитывать
+                LoadPrograms();
+            };
 
             // Напоминание: приложение остаётся в трее, только пока включена эта настройка
             Prefs.Changed += delegate { SyncTray(); RenderAll(); };
@@ -137,16 +174,6 @@ namespace DevTxt.Metla
             return shell.Root;
         }
 
-        FrameworkElement WindowButton(string glyph, string tip, bool danger, Action click)
-        {
-            var t = new TextBlock { Text = glyph, FontFamily = Ui.IconFont, FontSize = Tokens.Size.Micro, Foreground = Ui.Label2, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-            var b = new Border { Width = 36, Height = 26, CornerRadius = new CornerRadius(Tokens.Radius.Tip), Background = Brushes.Transparent, Child = t, ToolTip = tip };
-            b.MouseEnter += delegate { b.Background = danger ? Ui.Solid(Tokens.Palette.Red) : Ui.Fill2; t.Foreground = Ui.Label; };
-            b.MouseLeave += delegate { b.Background = Brushes.Transparent; t.Foreground = Ui.Label2; };
-            b.MouseLeftButtonUp += delegate { click(); };
-            return b;
-        }
-
         internal void ShowPage(int i)
         {
             page = i;
@@ -171,35 +198,64 @@ namespace DevTxt.Metla
             Motion.Stagger(p.Entrance);
         }
 
+        // Обновляет открытую страницу на месте (строки не пересоздаются), строку состояния и кнопки
         internal void RenderAll()
         {
-            if (page == POverview) overview.Render();
-            else if (page == PClean) clean.Render();
-            else if (page == PStartup) startup.Render();
-            else programs.Render();
+            if (page == POverview) overview.Update();
+            else if (page == PClean) clean.Update();
+            else if (page == PStartup) startup.Update();
+            else programs.Update();
+            Footer();
 
             long files;
             long chosen = Scanner.Chosen(Cats, out files);
-            string line;
-            if (Notice != null) line = Notice;
-            else if (Busy) line = BusyText ?? "Работаю…";
-            else if (page == PStartup) line = StartupItems == null ? "Читаю список…" : "Отключённое можно включить обратно здесь или в Диспетчере задач";
-            else if (page == PPrograms) line = Progs == null ? "Читаю список…" : "Программ: " + Fmt.Count(Progs.Count) + " · каждую удаляет её собственная программа удаления";
-            else if (Last != null) line = "Освобождено " + Fmt.Size(Last.Freed) + " · удалено: " + Fmt.Count(Last.Deleted) + (Last.Skipped + Last.Refused > 0 ? " · пропущено: " + Fmt.Count(Last.Skipped + Last.Refused) + " (заняты или нет доступа)" : "");
-            else if (Scanned) line = "Проверено в " + ScanAt.ToLocalTime().ToString("HH:mm") + " · выбрано " + Fmt.Size(chosen);
-            else line = "Проверка только смотрит и ничего не удаляет";
-            Motion.Swap(footer, line + " · версия " + Program.VersionText + " · dev.txt™");
-            coreLink.Text = CoreApp.Label(DemoMode || AppHub.Online);
-            footer.Foreground = Notice != null ? Ui.Solid(Tokens.Palette.Red) : Ui.Label3;
-
-            if (page == PStartup) { secondBtn.Hide(); mainBtn.Set("Обновить список", null, !loadingStartup, LoadStartup); }
-            else if (page == PPrograms) { secondBtn.Hide(); mainBtn.Set("Обновить список", null, !loadingProgs, LoadPrograms); }
+            if (page == PStartup) { secondBtn.Hide(); mainBtn.Set("Обновить список", null, !LoadingStartup, LoadStartup); }
+            else if (page == PPrograms) { secondBtn.Hide(); mainBtn.Set("Обновить список", null, !LoadingProgs, LoadPrograms); }
             else if (!Scanned) { secondBtn.Hide(); mainBtn.Set(Busy ? "Проверяю…" : "Проверить", Tokens.Palette.Brand, !Busy, StartScan); }
             else
             {
                 secondBtn.Set("Проверить снова", null, !Busy, StartScan);
                 mainBtn.Set("Очистить выбранное", Tokens.Palette.Brand, !Busy && chosen + files > 0, AskClean);
             }
+        }
+
+        // Что сейчас делается — одной строкой: для строки состояния и для «Обзора»
+        internal string BusyLine()
+        {
+            if (Cleaning) return "Удаляю выбранное: " + Fmt.Count(CleanDone) + " из " + Fmt.Count(CleanTotal);
+            return BusyText ?? "Работаю…";
+        }
+
+        void Footer()
+        {
+            long files;
+            long chosen = Scanner.Chosen(Cats, out files);
+            string line;
+            if (Notice != null) line = Notice;
+            else if (page == PStartup) line = LoadingStartup || StartupItems == null ? "Читаю список…" : "Отключённое можно включить обратно здесь или в Диспетчере задач";
+            else if (page == PPrograms) line = Progs == null ? "Читаю список…" : "Программ: " + Fmt.Count(Progs.Count) + " · каждую удаляет её собственная программа удаления";
+            else if (Busy) line = BusyLine();
+            else if (Last != null) line = "Освобождено " + Fmt.Size(Last.Freed) + " · удалено: " + Fmt.Count(Last.Deleted) + (Last.Skipped + Last.Refused > 0 ? " · пропущено: " + Fmt.Count(Last.Skipped + Last.Refused) + " (заняты или нет доступа)" : "");
+            else if (Scanned) line = "Проверено в " + ScanAt.ToLocalTime().ToString("HH:mm") + " · выбрано " + Fmt.Size(chosen);
+            else line = "Проверка только смотрит и ничего не удаляет";
+            Motion.Swap(footer, line);
+            footer.Foreground = Notice != null ? Ui.Solid(Tokens.Palette.Red) : Ui.Label3;
+            coreLink.Text = CoreApp.Label(DemoMode || AppHub.Online);
+        }
+
+        // Шаг проверки или очистки: меняются только полоса хода на «Обзоре» и строка состояния
+        void Tick()
+        {
+            if (page == POverview) overview.Tick();
+            Footer();
+        }
+
+        // Открыть категорию на странице «Очистка» — раскрытой и на виду
+        internal void OpenCategory(string id)
+        {
+            ShowPage(PClean);
+            clean.Expand(id);
+            clean.Reveal(id);
         }
 
         void ReadDisk()
@@ -213,6 +269,18 @@ namespace DevTxt.Metla
         }
 
         // ───────── Проверка: только чтение ─────────
+        // Проверка идёт в новые объекты категорий; готовый список подменяется здесь, в потоке окна
+        void Swap(List<Category> fresh)
+        {
+            foreach (Category c in fresh)
+            {
+                Category was = Scanner.Find(Cats, c.Id);
+                if (was != null) c.On = was.On;
+            }
+            Cats = fresh;
+            CatsVersion++;
+        }
+
         internal async void StartScan()
         {
             if (Busy) return;
@@ -222,14 +290,26 @@ namespace DevTxt.Metla
             Busy = true;
             BusyText = "Проверяю…";
             RenderAll();
-            var cats = Cats;
-            await Task.Run(delegate
+            bool ok = false;
+            try
             {
-                Scanner.ScanAll(cats, Env.Real(), delegate(Category c) { Dispatcher.BeginInvoke(new Action(delegate { BusyText = "Проверяю: " + c.Title.ToLowerInvariant() + "…"; if (Busy) RenderAll(); })); });
-            });
-            ReadDisk();
-            Busy = false;
-            FinishScan(true);
+                List<Category> old = Cats;
+                Env env = Env.Real();
+                List<Category> fresh = await Task.Run(delegate
+                {
+                    return Scanner.ScanFresh(old, env, delegate(Category c)
+                    {
+                        string title = c.Title;
+                        Dispatcher.BeginInvoke(new Action(delegate { if (!Busy || Cleaning) return; BusyText = "Проверяю: " + title.ToLowerInvariant() + "…"; Tick(); }));
+                    });
+                });
+                Swap(fresh);
+                ReadDisk();
+                ok = true;
+            }
+            catch (Exception e) { Notice = "Проверка не удалась: " + e.Message; }
+            finally { Busy = false; BusyText = null; }
+            if (ok) FinishScan(true); else RenderAll();
         }
 
         void FinishScan(bool animate)
@@ -247,19 +327,22 @@ namespace DevTxt.Metla
             if (Busy || !Scanned) return;
             // Корзина могла измениться после проверки — в вопросе должны стоять числа на эту секунду
             Category bin = Scanner.Find(Cats, "recycle");
-            if (!DemoMode && bin != null && bin.Chosen) { Scanner.Scan(bin, Env.Real()); bin.On = true; }
+            if (!DemoMode && bin != null && bin.Chosen) { Scanner.Scan(bin, Env.Real()); RenderAll(); }
 
-            long files;
-            long total = Scanner.Chosen(Cats, out files);
-            if (total + files == 0) { RenderAll(); return; }
+            // Снимок выбора: в листе показано ровно это, и удалено будет ровно это — что бы ни стало с переключателями потом
+            List<Category> cats = Cats;
+            HashSet<string> ids = Scanner.Snapshot(cats);
+            long total = 0, files = 0;
             var body = new StackPanel();
             bool anyPermanent = false, recycle = false;
-            foreach (Category c in Cats)
+            foreach (Category c in cats)
             {
-                if (!c.Chosen) continue;
+                if (!ids.Contains(c.Id)) continue;
+                total += c.Bytes; files += c.Count;
                 if (c.IsRecycle) recycle = true; else anyPermanent = true;
                 body.Children.Add(SheetLine(c.Title, c.IsRecycle ? Fmt.Plural(c.Count, "объект", "объекта", "объектов") : Fmt.Files(c.Count), Fmt.Size(c.Bytes), false));
             }
+            if (ids.Count == 0 || total + files == 0) { RenderAll(); return; }
             body.Children.Add(new Border { Height = 1, Background = Ui.Separator, Margin = new Thickness(0, 8, 0, 8) });
             body.Children.Add(SheetLine("Всего", Fmt.Plural(files, "объект", "объекта", "объектов"), Fmt.Size(total), true));
             string warn = "";
@@ -269,7 +352,7 @@ namespace DevTxt.Metla
             var note = Ui.T(warn, Tokens.Size.Caption, Ui.Label2, FontWeights.Normal);
             note.TextWrapping = TextWrapping.Wrap; note.Margin = new Thickness(0, 14, 0, 0);
             body.Children.Add(note);
-            OpenSheet("Удалить выбранное?", body, "Удалить " + Fmt.Size(total), Tokens.Palette.Red, DoClean);
+            OpenSheet("Удалить выбранное?", body, "Удалить " + Fmt.Size(total), Tokens.Palette.Red, delegate { DoClean(cats, ids); });
         }
 
         static FrameworkElement SheetLine(string name, string count, string size, bool strong)
@@ -287,38 +370,55 @@ namespace DevTxt.Metla
             return line;
         }
 
-        async void DoClean()
+        // cats и ids — снимок, сделанный при открытии листа: чистится он, а не то, что выбрано сейчас
+        async void DoClean(List<Category> cats, HashSet<string> ids)
         {
             if (Busy) return;
             Notice = null;
-            if (DemoMode) { Last = Demo.Clean(this); FinishScan(false); return; }
+            if (DemoMode) { Last = Demo.Clean(this, ids); FinishScan(false); return; }
             Busy = true;
-            BusyText = "Удаляю выбранное…";
-            RenderAll();
-            var cats = Cats;
+            Cleaning = true;
+            CleanDone = 0; CleanTotal = 0;
+            foreach (Category c in cats) if (ids.Contains(c.Id)) CleanTotal += c.Count;
+            RenderAll();   // переключатели гаснут: выбор заморожен до конца работы
             CleanResult r = null;
+            bool ok = false;
             try
             {
-                r = await Task.Run(delegate
+                Env env = Env.Real();
+                try
                 {
-                    return Cleaner.Clean(cats, Env.Real(), delegate(double p) { Dispatcher.BeginInvoke(new Action(delegate { BusyText = "Удаляю выбранное… " + Math.Round(p * 100) + "%"; if (Busy) RenderAll(); })); });
-                });
+                    r = await Task.Run(delegate
+                    {
+                        return Cleaner.Clean(cats, ids, env, delegate(long done, long total)
+                        {
+                            Dispatcher.BeginInvoke(new Action(delegate { if (!Cleaning) return; CleanDone = done; CleanTotal = total; Tick(); }));
+                        });
+                    });
+                }
+                catch (Exception e) { Notice = "Очистка остановилась: " + e.Message; }
+                // После очистки — новая проверка: числа на экране должны быть настоящими
+                Cleaning = false;
+                BusyText = "Проверяю, что осталось…";
+                Tick();
+                List<Category> old = Cats;
+                Env again = Env.Real();
+                List<Category> fresh = await Task.Run(delegate { return Scanner.ScanFresh(old, again, null); });
+                Swap(fresh);
+                ReadDisk();
+                ok = true;
             }
-            catch (Exception e) { Notice = "Очистка остановилась: " + e.Message; }
-            // После очистки — новая проверка: числа на экране должны быть настоящими
-            BusyText = "Проверяю, что осталось…";
-            RenderAll();
-            await Task.Run(delegate { Scanner.ScanAll(cats, Env.Real(), null); });
-            ReadDisk();
-            Busy = false;
+            catch (Exception e) { if (Notice == null) Notice = "Проверка после очистки не удалась: " + e.Message; }
+            finally { Busy = false; Cleaning = false; BusyText = null; }
             Last = r;
-            FinishScan(false);
+            if (ok) FinishScan(false); else RenderAll();
         }
 
         // ───────── Лист с вопросом поверх окна ─────────
         internal void OpenSheet(string title, FrameworkElement body, string confirm, Color tint, Action onConfirm)
         {
             var head = Ui.T(title, Tokens.Size.Title, Ui.Label, FontWeights.SemiBold);
+            head.TextWrapping = TextWrapping.Wrap;
             head.Margin = new Thickness(0, 0, 0, 12);
             var yes = new Btn();
             yes.Set(confirm, tint, true, delegate { CloseSheet(); onConfirm(); });
@@ -329,33 +429,78 @@ namespace DevTxt.Metla
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 18, 0, 0), Children = { no.Root, yes.Root } };
             var glass = Ui.Block(new StackPanel { Children = { head, body, buttons } }, false);
             glass.Padding = new Thickness(22, 20, 22, 18);
-            var card = new Border { Width = 520, CornerRadius = new CornerRadius(Tokens.Radius.Block), Background = Ui.Light ? Ui.Solid(Tokens.Light.Raised) : Ui.Solid(Tokens.Dark.Surface), Child = glass, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };   // audit:ok — цвет выбран по теме
+            var card = new Border { Width = 520, CornerRadius = new CornerRadius(Tokens.Radius.Block), Background = Ui.Light ? Ui.Solid(Tokens.Light.Raised) : Ui.Solid(Tokens.Dark.Surface), Child = glass, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(16) };   // audit:ok — цвет выбран по теме
+            // Tab ходит по кругу внутри листа
+            KeyboardNavigation.SetTabNavigation(card, KeyboardNavigationMode.Cycle);
+            KeyboardNavigation.SetControlTabNavigation(card, KeyboardNavigationMode.Cycle);
+            KeyboardNavigation.SetDirectionalNavigation(card, KeyboardNavigationMode.Cycle);
             var dim = new Border { Background = Ui.Solid(Ui.Alpha(Colors.Black, 0.4)) };   // «дымка» Windows 11 под диалогом — всегда полупрозрачный чёрный
             dim.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; };   // щелчок мимо листа ничего не делает
+            int token = ++sheetToken;
+            if (!sheetOpen) sheetReturn = Keyboard.FocusedElement;
+            sheetOpen = true;
+            sheetCancel = no;
+            sheetCard = card;
+            sheetLayer.BeginAnimation(UIElement.OpacityProperty, null);
+            sheetLayer.Opacity = 1;
+            sheetLayer.IsHitTestVisible = true;
             sheetLayer.Children.Clear();
             sheetLayer.Children.Add(dim);
             sheetLayer.Children.Add(card);
             sheetLayer.Visibility = Visibility.Visible;
             if (IsVisible) Motion.GrowFrom(card, new Point(0.5, 0.5));
+            // Фокус — на «Отмена»: случайный Enter ничего не удалит
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(delegate { if (sheetOpen && token == sheetToken) Keyboard.Focus(no.Root); }));
         }
 
         void CloseSheet()
         {
-            sheetLayer.Visibility = Visibility.Collapsed;
-            sheetLayer.Children.Clear();
+            if (!sheetOpen) return;
+            sheetOpen = false;
+            sheetCancel = null;
+            sheetCard = null;
+            int token = ++sheetToken;
+            IInputElement back = sheetReturn;
+            sheetReturn = null;
+            if (back != null) Keyboard.Focus(back); else Keyboard.ClearFocus();
+            Action done = delegate
+            {
+                if (token != sheetToken) return;   // за это время открыли другой лист
+                sheetLayer.Visibility = Visibility.Collapsed;
+                sheetLayer.Children.Clear();
+                sheetLayer.BeginAnimation(UIElement.OpacityProperty, null);
+                sheetLayer.Opacity = 1;
+                sheetLayer.IsHitTestVisible = true;
+            };
+            if (!Ui.Live(sheetLayer)) { done(); return; }
+            // Лист растворяется и только потом убирается; щелчки в это время уже идут в окно
+            sheetLayer.IsHitTestVisible = false;
+            var fade = new DoubleAnimation(0, TimeSpan.FromMilliseconds(Tokens.Motion.FastMs)) { EasingFunction = Ui.EaseOut };
+            fade.Completed += delegate { done(); };
+            sheetLayer.BeginAnimation(UIElement.OpacityProperty, fade);
         }
 
         // ───────── Автозапуск и программы ─────────
         internal async void LoadStartup()
         {
-            if (loadingStartup) return;
+            if (LoadingStartup) return;
             if (DemoMode) { RenderAll(); return; }
-            loadingStartup = true;
+            LoadingStartup = true;
             Notice = null;
             RenderAll();
-            List<StartupEntry> list = await Task.Run(delegate { return Startup.Read(); });
-            StartupItems = list;
-            loadingStartup = false;
+            try
+            {
+                // Список и значки читаются в фоне; в окне остаётся только показать
+                List<StartupEntry> list = await Task.Run(delegate
+                {
+                    List<StartupEntry> read = Startup.Read();
+                    foreach (StartupEntry e in read) e.Icon = Icons.Of(e.Exe);
+                    return read;
+                });
+                StartupItems = list;
+            }
+            catch (Exception e) { Notice = "Не удалось прочитать автозапуск: " + e.Message; }
+            finally { LoadingStartup = false; }
             RenderAll();
             if (page == PStartup) Enter();
         }
@@ -366,21 +511,38 @@ namespace DevTxt.Metla
             if (DemoMode) { e.Enabled = on; RenderAll(); return; }
             try { Startup.Set(e, on); }
             catch (Exception x) { Notice = "Не получилось изменить автозапуск: " + x.Message; }
-            RenderAll();
+            RenderAll();   // после ошибки переключатель возвращается назад
         }
 
         internal async void LoadPrograms()
         {
-            if (loadingProgs) return;
+            if (LoadingProgs) return;
             if (DemoMode) { RenderAll(); return; }
-            loadingProgs = true;
+            LoadingProgs = true;
             Notice = null;
             RenderAll();
-            List<Prog> list = await Task.Run(delegate { return Programs.Read(); });
-            Progs = list;
-            loadingProgs = false;
+            List<Prog> list = null;
+            bool first = Progs == null;
+            try
+            {
+                list = await Task.Run(delegate { return Programs.Read(); });
+                // Программа, которую удаляли, исчезла из списка — больше перечитывать при возвращении в окно не нужно
+                Prog gone = pendingUninstall;
+                if (gone != null && !list.Exists(delegate(Prog p) { return p.Name == gone.Name && p.Version == gone.Version; })) pendingUninstall = null;
+                Progs = list;
+            }
+            catch (Exception e) { Notice = "Не удалось прочитать список программ: " + e.Message; list = null; }
+            finally { LoadingProgs = false; }
             RenderAll();
-            if (page == PPrograms) Enter();
+            if (page == PPrograms && first) Enter();
+            if (list == null) return;
+            // Значки — после списка и тоже в фоне: список не ждёт их
+            try
+            {
+                await Task.Run(delegate { foreach (Prog p in list) p.Icon = Icons.Of(p.IconPath); });
+                if (Progs == list) programs.IconsReady();
+            }
+            catch { }
         }
 
         internal void AskUninstall(Prog p)
@@ -392,7 +554,7 @@ namespace DevTxt.Metla
                 Notice = null;
                 if (!DemoMode)
                 {
-                    try { Programs.Launch(p); }
+                    try { Programs.Launch(p); pendingUninstall = p; pendingSince = DateTime.UtcNow; }
                     catch (Exception x) { Notice = "Не удалось запустить программу удаления: " + x.Message; }
                 }
                 RenderAll();
@@ -402,16 +564,18 @@ namespace DevTxt.Metla
         internal void OpenFolder(string dir)
         {
             if (DemoMode || string.IsNullOrEmpty(dir)) return;
-            try { System.Diagnostics.Process.Start("explorer.exe", "\"" + dir + "\""); }
-            catch (Exception x) { Notice = "Не удалось открыть папку: " + x.Message; RenderAll(); }
+            try { System.Diagnostics.Process.Start("explorer.exe", "\"" + dir + "\""); Notice = null; }
+            catch (Exception x) { Notice = "Не удалось открыть папку: " + x.Message; }
+            RenderAll();
         }
 
         // Окно Windows «Защита системы»: точки восстановления создаются и настраиваются там, не здесь
         internal void OpenProtection()
         {
             if (DemoMode) return;
-            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("SystemPropertiesProtection.exe") { UseShellExecute = true }); }
-            catch (Exception x) { Notice = "Не удалось открыть «Защиту системы»: " + x.Message; RenderAll(); }
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("SystemPropertiesProtection.exe") { UseShellExecute = true }); Notice = null; }
+            catch (Exception x) { Notice = "Не удалось открыть «Защиту системы»: " + x.Message; }
+            RenderAll();
         }
 
         // ───────── Трей и ежедневное напоминание ─────────
@@ -477,17 +641,27 @@ namespace DevTxt.Metla
         // Раз в день, пока включено напоминание: та же проверка только для чтения
         async void DailyCheck()
         {
-            if (!Prefs.Remind || Busy || sheetLayer.Visibility == Visibility.Visible) return;
+            if (!Prefs.Remind || Busy || sheetOpen) return;
             if (DateTime.UtcNow - Prefs.LastAuto < TimeSpan.FromHours(24)) return;
             Prefs.LastAuto = DateTime.UtcNow;
             Prefs.Save();
             Busy = true;
             BusyText = "Ежедневная проверка…";
             RenderAll();
-            var cats = Cats;
-            await Task.Run(delegate { Scanner.ScanAll(cats, Env.Real(), null); });
-            ReadDisk();
-            Busy = false;
+            bool ok = false;
+            try
+            {
+                List<Category> old = Cats;
+                Env env = Env.Real();
+                List<Category> fresh = await Task.Run(delegate { return Scanner.ScanFresh(old, env, null); });
+                Swap(fresh);
+                ReadDisk();
+                ok = true;
+            }
+            catch (Exception e) { Notice = "Ежедневная проверка не удалась: " + e.Message; }
+            finally { Busy = false; BusyText = null; }
+            if (!ok) { RenderAll(); return; }
+            Notice = null;
             Last = null;
             FinishScan(false);
             long total = Scanner.Total(Cats);
@@ -502,9 +676,14 @@ namespace DevTxt.Metla
             Activate();
         }
 
-        // Рисует окно в файл PNG, не показывая его на экране
-        public void Shot(string file, bool sheet, string expand, double scroll)
+        // Рисует окно в файл PNG, не показывая его на экране.
+        // state — выдуманное состояние для снимка (только вместе с --demo): scan | clean | done | loading
+        public void Shot(string file, bool sheet, string expand, double scroll, string state)
         {
+            if (DemoMode && state == "scan") { Scanned = false; Busy = true; BusyText = "Проверяю: кэш браузеров…"; }
+            else if (DemoMode && state == "clean") { Busy = true; Cleaning = true; CleanDone = 2816; CleanTotal = 4264; }
+            else if (DemoMode && state == "done") Last = Demo.Clean(this, Scanner.Snapshot(Cats));
+            else if (DemoMode && state == "loading") { StartupItems = null; Progs = null; LoadingStartup = true; LoadingProgs = true; }
             if (expand != null) clean.Expand(expand);
             var root = (FrameworkElement)Content;
             Content = null;

@@ -5,6 +5,7 @@
 //   --shot файл.png     нарисовать окно в файл и выйти (обычно вместе с --demo)
 //   --page имя          какую страницу открыть: обзор | очистка | автозапуск | программы (или overview | cleanup | startup | programs)
 //   --sheet             для снимка: показать вопрос перед очисткой;  --expand id — раскрыть категорию;  --scroll N — прокрутить
+//   --state имя         для снимка в --demo: scan (идёт проверка) | clean (идёт очистка) | done (итог очистки) | loading (списки читаются)
 //   --scan-only         настоящая проверка только для чтения: печатает итоги по категориям и выходит, ничего не удаляя
 //   --selftest          проверить правила удаления на собственной временной папке, настройки и работу без хаба; код выхода 0 — всё в порядке
 //   --headless          запуститься без окна: только связь с хабом (для проверок протокола)
@@ -81,6 +82,7 @@ namespace DevTxt.Metla
             }
 
             var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            Ui.Styles(app.Resources);   // подсказки и тонкие полосы прокрутки — общие для всех окон dev.txt
             if (demo) Prefs.Persist = false; else Prefs.Load();
             Safe.Armed = !demo && shot == null;   // в --demo и на снимках удаление выключено совсем
             var w = new MainWindow(demo, page);
@@ -88,7 +90,7 @@ namespace DevTxt.Metla
             {
                 double scroll;
                 double.TryParse(Arg(args, "--scroll") ?? "0", NumberStyles.Float, CultureInfo.InvariantCulture, out scroll);
-                w.Shot(shot, Array.IndexOf(args, "--sheet") >= 0, Arg(args, "--expand"), scroll);
+                w.Shot(shot, Array.IndexOf(args, "--sheet") >= 0, Arg(args, "--expand"), scroll, Arg(args, "--state"));
                 return 0;
             }
 

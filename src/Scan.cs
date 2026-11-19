@@ -412,6 +412,37 @@ namespace DevTxt.Metla
                 Scan(c, env);
             }
         }
+
+        // Проверка в новые объекты: старый список не меняется ни на байт, пока идёт работа, — окно может спокойно
+        // его показывать. Выбор (On) переносится по Id. Готовый список подменяется уже в потоке окна.
+        public static List<Category> ScanFresh(List<Category> old, Env env, Action<Category> progress)
+        {
+            List<Category> fresh = Categories();
+            foreach (var c in fresh)
+            {
+                Category was = old == null ? null : Find(old, c.Id);
+                if (was != null) c.On = was.On;
+                if (progress != null) progress(c);
+                Scan(c, env);
+            }
+            return fresh;
+        }
+
+        // Что именно будет очищено: Id выбранных категорий на эту секунду. Снимок делается, когда открывается
+        // вопрос, и очищается ровно он — что бы потом ни случилось с переключателями.
+        public static HashSet<string> Snapshot(List<Category> list)
+        {
+            var ids = new HashSet<string>();
+            foreach (var c in list) if (c.Chosen) ids.Add(c.Id);
+            return ids;
+        }
+    }
+
+    // Итог по одной категории — для разбивки после очистки
+    class CleanPart
+    {
+        public string Id, Title;
+        public long Freed, Deleted, Skipped;
     }
 
     class CleanResult
@@ -419,33 +450,55 @@ namespace DevTxt.Metla
         public long Freed;
         public long Deleted, Skipped, Refused;
         public bool RecycleEmptied;
+        public readonly List<CleanPart> Parts = new List<CleanPart>();
     }
 
     static class Cleaner
     {
-        // Удаляет то, что нашла проверка в выбранных категориях. Каждый файл перед удалением проверяется заново.
+        // Удаляет то, что нашла проверка в выбранных сейчас категориях: выбор читается один раз, в самом начале.
         public static CleanResult Clean(List<Category> list, Env env, Action<double> progress)
+        {
+            Action<long, long> p = null;
+            if (progress != null) p = delegate(long done, long total) { progress(total == 0 ? 1 : done / (double)total); };
+            return Clean(list, Scanner.Snapshot(list), env, p);
+        }
+
+        // Можно ли чистить категорию из снимка: переключатель (On) здесь уже не читается — только то, что чистить нельзя никогда
+        static bool Allowed(Category c, ICollection<string> ids)
+        {
+            return ids != null && ids.Contains(c.Id) && c.Cleanable && c.Bytes + c.Count > 0;
+        }
+
+        // Удаляет то, что нашла проверка, ровно в категориях из снимка ids (он сделан, когда открылся вопрос).
+        // Категория, включённая позже, не очищается. Каждый файл перед удалением проверяется заново.
+        public static CleanResult Clean(List<Category> list, ICollection<string> ids, Env env, Action<long, long> progress)
         {
             var r = new CleanResult();
             long total = 0, done = 0;
-            foreach (var c in list) if (c.Chosen) total += c.Count;
+            foreach (var c in list) if (Allowed(c, ids)) total += c.Count;
             DateTime now = DateTime.UtcNow > env.Now ? DateTime.UtcNow : env.Now;
+            if (progress != null) progress(0, total);
 
             foreach (var c in list)
             {
-                if (!c.Chosen) continue;          // не выбрана, только для сведения или нужны права
+                if (!Allowed(c, ids)) continue;   // нет в снимке, только для сведения или нужны права
+                var part = new CleanPart { Id = c.Id, Title = c.Title };
+                r.Parts.Add(part);
+                long freed0 = r.Freed, deleted0 = r.Deleted, skipped0 = r.Skipped + r.Refused;
                 if (c.IsRecycle)
                 {
                     if (env.RealRecycle && Shell.EmptyRecycle()) { r.RecycleEmptied = true; r.Freed += c.Bytes; r.Deleted += c.Count; }
                     else r.Skipped += c.Count;
                     done += c.Count;
+                    part.Freed = r.Freed - freed0; part.Deleted = r.Deleted - deleted0; part.Skipped = r.Skipped + r.Refused - skipped0;
+                    if (progress != null) progress(done, total);
                     continue;
                 }
                 var busy = new Dictionary<string, bool>();   // браузер могли открыть уже после проверки
                 foreach (Item it in c.Items)
                 {
                     done++;
-                    if (progress != null && (done & 63) == 0) progress(total == 0 ? 1 : done / (double)total);
+                    if (progress != null && (done & 63) == 0) progress(done, total);
                     if (it.Owner != null)
                     {
                         bool run;
@@ -475,8 +528,9 @@ namespace DevTxt.Metla
                     try { if (Directory.GetFileSystemEntries(d.Path).Length > 0) continue; } catch { continue; }
                     Safe.Delete(d.Root, d.Path);
                 }
+                part.Freed = r.Freed - freed0; part.Deleted = r.Deleted - deleted0; part.Skipped = r.Skipped + r.Refused - skipped0;
             }
-            if (progress != null) progress(1);
+            if (progress != null) progress(total, total);
             return r;
         }
     }
