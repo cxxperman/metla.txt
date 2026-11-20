@@ -22,6 +22,7 @@ namespace DevTxt.Metla
         static int published;
         static Dictionary<string, object> found;   // итог последней проверки; до первой проверки состояния нет
 
+        public static Action Quit;                  // закрыть metla.txt: «Закрыть» в трее core.txt, пока своего значка нет
         public static Action Show;                  // показать окно: команда «show» от другого приложения
         public static Func<IList<TrayItem>> Tray;   // пункты metla.txt для общего меню трея core.txt — берутся при запуске связи
         public static event Action StatusChanged;   // связь появилась или пропала; вызывается в потоке окна
@@ -110,7 +111,7 @@ namespace DevTxt.Metla
                 OnUi(delegate { Ui.ForceReducedMotion = reduced; });
             };
             l.OnStatus = delegate(bool on) { OnUi(delegate { if (StatusChanged != null) StatusChanged(); }); };
-            fam = new Family(l, Program.Id);
+            fam = new Family(l, Program.Id, delegate { OnUi(delegate { if (Quit != null) Quit(); }); });
             fam.Changed = delegate { OnUi(delegate { if (FamilyChanged != null) FamilyChanged(); }); };   // приходит в потоке хаба
             if (Tray != null) fam.SetTray(Tray());   // хаба ещё нет — клиент запомнит и отдаст после подключения
             return l;

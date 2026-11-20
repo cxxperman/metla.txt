@@ -100,6 +100,7 @@ namespace DevTxt.Metla
             if (!demo || AppHub.TestPort > 0)
             {
                 AppHub.Show = w.ShowWindow;
+                AppHub.Quit = w.QuitApp;     // «Закрыть» в трее core.txt
                 AppHub.Tray = w.TrayItems;   // пункты metla.txt в общем меню трея core.txt
                 AppHub.Start(w.Dispatcher);
             }

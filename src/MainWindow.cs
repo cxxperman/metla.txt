@@ -686,7 +686,7 @@ namespace DevTxt.Metla
             menu.Line();
             menu.Item(CoreApp.Label(DemoMode || AppHub.Online), false, delegate { if (!DemoMode) CoreApp.Go(AppHub.Online, AppHub.ShowCore); });
             menu.Line();
-            menu.Item("Выход", false, delegate { quitting = true; Close(); });
+            menu.Item("Выход", false, QuitApp);
         }
 
         // Пункты metla.txt в общем меню трея core.txt — самое частое: открыть окно и проверить диск (только чтение).
@@ -814,6 +814,9 @@ namespace DevTxt.Metla
             trayNotice = false;
             SyncTray();
         }
+
+        // Выход: «Выход» в своём трее или «Закрыть» в трее core.txt
+        public void QuitApp() { quitting = true; Close(); }
 
         public void ShowWindow()
         {
