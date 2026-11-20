@@ -1,6 +1,7 @@
 // metla.txt. MainWindow.cs — окно: шапка с вкладками, четыре страницы, строка состояния с главной кнопкой
 // и лист с вопросом поверх окна. Здесь же проверка, очистка и напоминание из трея.
-// Всё собрано из общих элементов (Ui.cs) и токенов (Tokens.cs).
+// Всё собрано из общих элементов (Ui.cs) и токенов (Tokens.cs). Общее для семьи dev.txt (один значок в трее у core.txt,
+// уведомления на острове kapsula.txt, «Не беспокоить» и игра) — через AppHub и Family.cs.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -66,6 +67,12 @@ namespace DevTxt.Metla
         Prog pendingUninstall;        // программа, для которой запущено удаление: список обновится, когда вы вернётесь в окно
         DateTime pendingSince;        // когда его запустили: через четверть часа ждать перестаём
         System.Windows.Forms.NotifyIcon tray;
+        readonly TrayHold trayHold = new TrayHold(TimeSpan.FromSeconds(3));   // только что запустились: свой значок ждёт слова core.txt, чтобы не мелькнуть
+        bool trayNotice;              // свой значок виден только ради уведомления Windows: общий значок у core.txt, а острова нет
+        readonly DispatcherTimer noticeEnd = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };   // запасной конец такого уведомления, если Windows о нём не сказала
+        bool trayBusy;                // с каким «идёт работа» пункты ушли в общее меню трея core.txt
+        bool remindPending;           // напоминание ждёт, когда его можно будет показать
+        readonly DispatcherTimer remindRetry = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
 
         [DllImport("user32.dll")]
         static extern bool DestroyIcon(IntPtr icon);
@@ -117,19 +124,33 @@ namespace DevTxt.Metla
                 firstScanDone = true;
                 if (!Scanned && !Busy) StartScan();
             };
-            // Вернулись в окно после запуска программы удаления — список программ перечитывается
             Activated += delegate
             {
-                if (pendingUninstall == null || LoadingProgs || sheetOpen) return;
+                if (sheetOpen) return;
+                // core.txt могли поставить или удалить, пока окно было в фоне: строки приложений dev.txt перестраиваются
+                if (page == PStartup || page == PPrograms) RenderAll();
+                // Вернулись в окно после запуска программы удаления — список программ перечитывается
+                if (pendingUninstall == null || LoadingProgs) return;
                 if (DateTime.UtcNow - pendingSince > TimeSpan.FromMinutes(15)) { pendingUninstall = null; return; }   // удаление отменили — хватит перечитывать
                 LoadPrograms();
             };
 
-            // Напоминание: приложение остаётся в трее, только пока включена эта настройка
+            // Напоминание: приложение остаётся в фоне, только пока включена эта настройка. Свой значок в трее — только
+            // когда общий не у core.txt: у семьи значок один (core.family.tray); связь пропала — свой появляется сразу.
+            // Только что запустились, а core.txt установлен — до трёх секунд ждём его слова, чтобы значок не мелькнул.
+            // Ожидание кончается по своему таймеру (TrayHold), а не по часам: без core.txt свой значок появляется всегда.
+            trayHold.Over = SyncTray;
+            if (CoreApp.Installed) trayHold.Start();
             Prefs.Changed += delegate { SyncTray(); RenderAll(); };
+            AppHub.FamilyChanged += delegate { SyncTray(); TryRemind(); };
+            AppHub.StatusChanged += delegate { if (!AppHub.Online) trayHold.Stop(); SyncTray(); Footer(); };
             SyncTray();
             daily.Tick += delegate { DailyCheck(); };
             daily.Start();
+            remindRetry.Tick += delegate { TryRemind(); };
+            noticeEnd.Tick += delegate { EndNotice(); };
+            // Окно открыли — напоминание уже не нужно: числа и так перед глазами
+            IsVisibleChanged += delegate { if (IsVisible) { remindPending = false; remindRetry.Stop(); } };
             Closing += delegate(object s, System.ComponentModel.CancelEventArgs e)
             {
                 if (!quitting && Prefs.Remind && tray != null) { e.Cancel = true; Hide(); return; }
@@ -217,6 +238,8 @@ namespace DevTxt.Metla
                 secondBtn.Set("Проверить снова", null, !Busy, StartScan);
                 mainBtn.Set("Очистить выбранное", Tokens.Palette.Brand, !Busy && chosen + files > 0, AskClean);
             }
+            // «Проверить диск» в общем меню трея core.txt недоступно, пока идёт работа
+            if (Busy != trayBusy) { trayBusy = Busy; AppHub.SetTray(TrayItems()); }
         }
 
         // Что сейчас делается — одной строкой: для строки состояния и для «Обзора»
@@ -232,8 +255,8 @@ namespace DevTxt.Metla
             long chosen = Scanner.Chosen(Cats, out files);
             string line;
             if (Notice != null) line = Notice;
-            else if (page == PStartup) line = LoadingStartup || StartupItems == null ? "Читаю список…" : "Отключённое можно включить обратно здесь или в Диспетчере задач";
-            else if (page == PPrograms) line = Progs == null ? "Читаю список…" : "Программ: " + Fmt.Count(Progs.Count) + " · каждую удаляет её собственная программа удаления";
+            else if (page == PStartup) line = LoadingStartup || StartupItems == null ? "Читаю список…" : "Отключённое можно включить обратно здесь или в Диспетчере задач" + (ManagedStartup ? ", а приложения dev.txt — в core.txt" : "");
+            else if (page == PPrograms) line = Progs == null ? "Читаю список…" : "Программ: " + Fmt.Count(Progs.Count) + " · каждую удаляет её собственная программа удаления" + (ManagedProgs ? ", а приложения dev.txt — core.txt" : "");
             else if (Busy) line = BusyLine();
             else if (Last != null) line = "Освобождено " + Fmt.Size(Last.Freed) + " · удалено: " + Fmt.Count(Last.Deleted) + (Last.Skipped + Last.Refused > 0 ? " · пропущено: " + Fmt.Count(Last.Skipped + Last.Refused) + " (заняты или нет доступа)" : "");
             else if (Scanned) line = "Проверено в " + ScanAt.ToLocalTime().ToString("HH:mm") + " · выбрано " + Fmt.Size(chosen);
@@ -505,9 +528,37 @@ namespace DevTxt.Metla
             if (page == PStartup) Enter();
         }
 
+        // core.txt установлен (в --demo — будто бы да): приложения dev.txt включает в автозапуск и удаляет он
+        internal bool CoreInstalled { get { return DemoMode || CoreApp.Installed; } }
+
+        // У приложений dev.txt здесь нет ни переключателя, ни «Удалить», пока есть core.txt: одна вещь — одно место.
+        // Без core.txt они такие же, как остальные программы.
+        internal static bool CanToggle(StartupEntry e, bool coreInstalled) { return e.Editable && !(coreInstalled && e.Family); }
+        internal static bool CanUninstall(Prog p, bool coreInstalled) { return !(coreInstalled && p.Family); }
+
+        // В списке есть строки, которыми ведает core.txt, — об этом говорит и подпись внизу
+        bool ManagedStartup { get { bool core = CoreInstalled; return core && StartupItems != null && StartupItems.Exists(delegate(StartupEntry e) { return e.Family; }); } }
+        bool ManagedProgs { get { bool core = CoreInstalled; return Progs != null && Progs.Exists(delegate(Prog p) { return !CanUninstall(p, core); }); } }
+
+        // Открыть core.txt на нужной странице («general», «apps»): запущенный — просьбой через хаб; установленный, но не
+        // запущенный — запуском сразу на этой странице (core.txt понимает --page, незнакомую страницу пропускает).
+        // core.txt успели удалить — строки перестраиваются: у приложений dev.txt снова обычный переключатель и «Удалить».
+        internal void OpenCore(string corePage)
+        {
+            if (DemoMode) return;
+            if (AppHub.Online) AppHub.ShowCore(corePage);
+            else if (CoreApp.Installed)
+            {
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(CoreApp.Path, "--page " + corePage) { UseShellExecute = true }); Notice = null; }
+                catch (Exception x) { Notice = "Не удалось открыть core.txt: " + x.Message; }
+            }
+            RenderAll();
+        }
+
         internal void ToggleStartup(StartupEntry e, bool on)
         {
             Notice = null;
+            if (e.Family && CoreInstalled) { RenderAll(); return; }   // им ведает core.txt: строка, построенная до его установки, перестроится без переключателя
             if (DemoMode) { e.Enabled = on; RenderAll(); return; }
             try { Startup.Set(e, on); }
             catch (Exception x) { Notice = "Не получилось изменить автозапуск: " + x.Message; }
@@ -547,6 +598,7 @@ namespace DevTxt.Metla
 
         internal void AskUninstall(Prog p)
         {
+            if (!CanUninstall(p, CoreInstalled)) { OpenCore("apps"); return; }   // приложение dev.txt удаляет core.txt
             var text = Ui.T("Откроется собственная программа удаления «" + p.Name + "» — дальше всё происходит в её окне. metla.txt сама файлы программ не трогает. Windows может спросить разрешение, если программе удаления нужны права администратора.", Tokens.Size.Body, Ui.Label2, FontWeights.Normal);
             text.TextWrapping = TextWrapping.Wrap;
             OpenSheet("Удалить «" + p.Name + "»?", text, "Запустить удаление", Tokens.Palette.Red, delegate
@@ -579,27 +631,26 @@ namespace DevTxt.Metla
         }
 
         // ───────── Трей и ежедневное напоминание ─────────
+        // Свой значок есть, пока включено напоминание; виден — только когда общий значок семьи не у core.txt
         void SyncTray()
         {
             if (Prefs.Remind && tray == null)
             {
                 try
                 {
-                    tray = new System.Windows.Forms.NotifyIcon { Icon = TrayIcon(), Text = "metla.txt", Visible = true };
+                    tray = new System.Windows.Forms.NotifyIcon { Icon = TrayIcon(), Text = "metla.txt", Visible = false };
                     // Меню Windows 11, а не серое меню WinForms
                     tray.MouseUp += delegate(object s, System.Windows.Forms.MouseEventArgs e)
                     {
                         if (e.Button != System.Windows.Forms.MouseButtons.Right) return;
                         var menu = new PopMenu();
-                        menu.Brand(Sprite, Program.Id);
-                        menu.Item("Открыть metla.txt", false, ShowWindow);
-                        menu.Item(CoreApp.Label(AppHub.Online), false, delegate { CoreApp.Go(AppHub.Online, AppHub.ShowCore); });
-                        menu.Line();
-                        menu.Item("Выход", false, delegate { quitting = true; Close(); });
+                        FillTrayMenu(menu);
                         menu.ShowAtCursor();
                     };
                     tray.MouseClick += delegate(object s, System.Windows.Forms.MouseEventArgs e) { if (e.Button == System.Windows.Forms.MouseButtons.Left) ShowWindow(); };
-                    tray.BalloonTipClicked += delegate { ShowWindow(); };
+                    // Уведомление закрыли или по нему щёлкнули: значок, показанный только ради него, снова прячется
+                    tray.BalloonTipClicked += delegate { ShowWindow(); EndNotice(); };
+                    tray.BalloonTipClosed += delegate { EndNotice(); };
                 }
                 catch { tray = null; }
             }
@@ -607,11 +658,68 @@ namespace DevTxt.Metla
             {
                 DropTray();
                 if (!IsVisible) { quitting = true; Close(); }   // напоминание выключили из core.txt, а окна нет — в фоне делать нечего
+                return;
             }
+            if (tray == null) return;
+            bool show = OwnTray(Prefs.Remind, AppHub.HideOwnTray, AppHub.CoreOnline, trayHold.Waiting, trayNotice);
+            try { if (tray.Visible != show) tray.Visible = show; } catch { }
+            if (show) TryRemind();   // значок вернулся (core.txt ушёл) — отложенное напоминание может показаться
+        }
+
+        // Виден ли свой значок. Только пока включено напоминание и только если общий значок не у core.txt (coreHolds);
+        // в первые секунды после запуска (starting) ждём слова core.txt, но не дольше: без входа приложение не остаётся.
+        // notice — идёт своё уведомление Windows: его показывает только видимый значок, поэтому на это время он виден всегда.
+        internal static bool OwnTray(bool remind, bool coreHolds, bool coreHeard, bool starting, bool notice)
+        {
+            if (!remind) return false;
+            if (notice) return true;
+            if (coreHolds) return false;
+            return !starting || coreHeard;
+        }
+
+        // Меню своего значка: «Открыть», «Проверить диск» (как в общем меню core.txt), дорога к core.txt и «Выход»
+        void FillTrayMenu(PopMenu menu)
+        {
+            menu.Brand(Sprite, Program.Id);
+            menu.Item("Открыть metla.txt", false, ShowWindow);
+            menu.Item("Проверить диск", false, Busy ? null : new Action(ScanFromTray));
+            menu.Line();
+            menu.Item(CoreApp.Label(DemoMode || AppHub.Online), false, delegate { if (!DemoMode) CoreApp.Go(AppHub.Online, AppHub.ShowCore); });
+            menu.Line();
+            menu.Item("Выход", false, delegate { quitting = true; Close(); });
+        }
+
+        // Пункты metla.txt в общем меню трея core.txt — самое частое: открыть окно и проверить диск (только чтение).
+        // Очистки отсюда нет и не будет: удаляется только из окна, после вопроса с точными числами.
+        internal static List<TrayItem> TrayMenu(bool busy, Action show, Action scan)
+        {
+            return new List<TrayItem>
+            {
+                new TrayItem("show", "Открыть", null, show),
+                new TrayItem("scan", "Проверить диск", null, !busy, scan)
+            };
+        }
+
+        // Пункты выполняются в потоке хаба — к окну только через Dispatcher
+        internal IList<TrayItem> TrayItems()
+        {
+            return TrayMenu(Busy, delegate { Dispatcher.BeginInvoke(new Action(ShowWindow)); }, delegate { Dispatcher.BeginInvoke(new Action(ScanFromTray)); });
+        }
+
+        // «Проверить диск» из меню трея: окно на «Обзоре» и та же проверка только для чтения, что и по кнопке «Проверить».
+        // Пока открыт вопрос перед очисткой, числа под ним не меняются — тогда только показываем окно.
+        void ScanFromTray()
+        {
+            ShowWindow();
+            if (Busy || sheetOpen) return;
+            if (page != POverview) ShowPage(POverview);
+            StartScan();
         }
 
         void DropTray()
         {
+            noticeEnd.Stop();
+            trayNotice = false;
             if (tray == null) return;
             try { tray.Visible = false; tray.Dispose(); } catch { }
             tray = null;
@@ -664,9 +772,47 @@ namespace DevTxt.Metla
             Notice = null;
             Last = null;
             FinishScan(false);
+            if (Scanner.Total(Cats) > RemindBytes && !IsVisible) { remindPending = true; TryRemind(); }
+        }
+
+        // Напоминание «Можно освободить …»: сначала на остров kapsula.txt, без него — своим уведомлением Windows.
+        // Пока включено «Не беспокоить» или впереди игра, оно ждёт: пробует раз в минуту и при каждой вести от core.txt.
+        // Общий значок у core.txt, а острова нет — свой значок появляется только на время уведомления и снова прячется.
+        void TryRemind()
+        {
+            if (!remindPending) return;
             long total = Scanner.Total(Cats);
-            if (total > RemindBytes && tray != null && !IsVisible)
-                try { tray.ShowBalloonTip(8000, "metla.txt", "Можно освободить " + Fmt.Size(total) + ". Откройте окно, чтобы посмотреть, что именно.", System.Windows.Forms.ToolTipIcon.None); } catch { }
+            bool quiet = Reminder.Quiet(AppHub.CoreOnline, AppHub.Focus, AppHub.Game, FullScreen.Ahead);
+            RemindWay way = Reminder.Way(IsVisible, Prefs.Remind && total > RemindBytes, quiet, AppHub.IslandOnline, tray != null);
+            string text = "Можно освободить " + Fmt.Size(total) + ". Откройте окно, чтобы посмотреть, что именно.";
+            if (way == RemindWay.Island && !AppHub.Notify(text)) way = RemindWay.Wait;   // остров ушёл в эту самую секунду
+            if (way == RemindWay.Balloon && !Balloon(text)) way = RemindWay.Wait;
+            if (way == RemindWay.Wait) { if (!remindRetry.IsEnabled) remindRetry.Start(); return; }
+            remindPending = false;   // показано (остров сам решает, показать сразу или тихо положить в историю) или уже не нужно
+            remindRetry.Stop();
+        }
+
+        // Своё уведомление Windows. Его показывает только видимый значок: пока общий значок у core.txt, свой появляется
+        // на время уведомления и прячется, когда Windows скажет, что оно закрыто, а если не скажет — через минуту.
+        bool Balloon(string text)
+        {
+            if (tray == null) return false;
+            try
+            {
+                if (!tray.Visible) { trayNotice = true; noticeEnd.Stop(); noticeEnd.Start(); tray.Visible = true; }
+                tray.ShowBalloonTip(8000, "metla.txt", text, System.Windows.Forms.ToolTipIcon.None);
+                return true;
+            }
+            catch { EndNotice(); return false; }
+        }
+
+        // Уведомление закрылось: значок, показанный только ради него, снова прячется (если общий по-прежнему у core.txt)
+        void EndNotice()
+        {
+            noticeEnd.Stop();
+            if (!trayNotice) return;
+            trayNotice = false;
+            SyncTray();
         }
 
         public void ShowWindow()
@@ -676,14 +822,44 @@ namespace DevTxt.Metla
             Activate();
         }
 
-        // Рисует окно в файл PNG, не показывая его на экране.
-        // state — выдуманное состояние для снимка (только вместе с --demo): scan | clean | done | loading
+        // Выдуманное состояние для снимка (только вместе с --demo): scan | clean | done | loading
+        void DemoState(string state)
+        {
+            if (!DemoMode || state == null) return;
+            if (state == "scan") { Scanned = false; Busy = true; BusyText = "Проверяю: кэш браузеров…"; }
+            else if (state == "clean") { Busy = true; Cleaning = true; CleanDone = 2816; CleanTotal = 4264; }
+            else if (state == "done") Last = Demo.Clean(this, Scanner.Snapshot(Cats));
+            else if (state == "loading") { StartupItems = null; Progs = null; LoadingStartup = true; LoadingProgs = true; }
+        }
+
+        // Меню своего значка в трее — в файл PNG, не показывая его на экране (--shot вместе с --menu)
+        public void MenuShot(string file, string state)
+        {
+            DemoState(state);
+            var menu = new PopMenu();
+            FillTrayMenu(menu);
+            var box = (FrameworkElement)menu.Content;
+            menu.Content = null;
+            var stage = new Border { Background = Ui.Bg, Padding = new Thickness(12), Child = box };
+            stage.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            stage.Arrange(new Rect(stage.DesiredSize));
+            stage.UpdateLayout();
+            Save(stage, file, (int)Math.Ceiling(stage.ActualWidth * 1.5), (int)Math.Ceiling(stage.ActualHeight * 1.5));
+        }
+
+        static void Save(FrameworkElement root, string file, int width, int height)
+        {
+            var bmp = new RenderTargetBitmap(width, height, 144, 144, PixelFormats.Pbgra32);
+            bmp.Render(root);
+            var enc = new PngBitmapEncoder();
+            enc.Frames.Add(BitmapFrame.Create(bmp));
+            using (var f = System.IO.File.Create(file)) enc.Save(f);
+        }
+
+        // Рисует окно в файл PNG, не показывая его на экране. state — выдуманное состояние для снимка (см. DemoState)
         public void Shot(string file, bool sheet, string expand, double scroll, string state)
         {
-            if (DemoMode && state == "scan") { Scanned = false; Busy = true; BusyText = "Проверяю: кэш браузеров…"; }
-            else if (DemoMode && state == "clean") { Busy = true; Cleaning = true; CleanDone = 2816; CleanTotal = 4264; }
-            else if (DemoMode && state == "done") Last = Demo.Clean(this, Scanner.Snapshot(Cats));
-            else if (DemoMode && state == "loading") { StartupItems = null; Progs = null; LoadingStartup = true; LoadingProgs = true; }
+            DemoState(state);
             if (expand != null) clean.Expand(expand);
             var root = (FrameworkElement)Content;
             Content = null;
@@ -698,11 +874,57 @@ namespace DevTxt.Metla
                 view.ScrollToVerticalOffset(scroll);
                 root.UpdateLayout();
             }
-            var bmp = new RenderTargetBitmap((int)(W * 1.5), (int)(H * 1.5), 144, 144, PixelFormats.Pbgra32);
-            bmp.Render(root);
-            var enc = new PngBitmapEncoder();
-            enc.Frames.Add(BitmapFrame.Create(bmp));
-            using (var f = System.IO.File.Create(file)) enc.Save(f);
+            Save(root, file, (int)(W * 1.5), (int)(H * 1.5));
         }
+    }
+
+    enum RemindWay { Drop, Wait, Island, Balloon }
+
+    // Когда и как показывать напоминание — без окон и без хаба, проверяется в --selftest
+    static class Reminder
+    {
+        // Сейчас не до напоминаний: «Не беспокоить» или впереди игра. С core.txt — по его общему правилу (core.family);
+        // без него — своя проверка окна на весь экран (ahead зовётся только тогда).
+        public static bool Quiet(bool coreOnline, bool focus, bool game, Func<bool> ahead)
+        {
+            if (coreOnline) return focus || game;
+            return ahead != null && ahead();
+        }
+
+        // windowVisible — окно и так открыто; wanted — напоминание включено и есть что освободить;
+        // island — остров kapsula.txt принимает уведомления; icon — есть свой значок, от которого Windows покажет
+        // уведомление (виден он или спрятан, пока общий значок у core.txt: на время уведомления он появится)
+        public static RemindWay Way(bool windowVisible, bool wanted, bool quiet, bool island, bool icon)
+        {
+            if (!wanted || windowVisible) return RemindWay.Drop;
+            if (quiet) return RemindWay.Wait;
+            if (island) return RemindWay.Island;
+            if (icon) return RemindWay.Balloon;
+            return RemindWay.Wait;   // своего значка нет совсем (не удалось создать): ждём острова
+        }
+    }
+
+    // Ожидание слова core.txt сразу после запуска: свой значок не должен мелькнуть, пока не ясно, у кого общий значок.
+    // Кончается только по своему таймеру или по Stop (связь пропала), а не по сравнению часов: DispatcherTimer считает
+    // по Environment.TickCount и бывает, что срабатывает на несколько миллисекунд раньше срока по DateTime.UtcNow.
+    // Тогда ожидание не кончилось бы никогда, и без запущенного core.txt своего значка не было бы совсем.
+    class TrayHold
+    {
+        readonly DispatcherTimer timer;
+        bool waiting;
+        public Action Over;   // время вышло: пора решить, показывать ли свой значок
+
+        public TrayHold(TimeSpan wait)
+        {
+            timer = new DispatcherTimer { Interval = wait };
+            timer.Tick += delegate { Stop(); if (Over != null) Over(); };
+        }
+
+        public bool Waiting { get { return waiting; } }
+
+        public void Start() { waiting = true; timer.Stop(); timer.Start(); }
+
+        // Ждать больше нечего. Over при этом не зовётся: кто остановил, тот сам и решает про значок.
+        public void Stop() { timer.Stop(); waiting = false; }
     }
 }

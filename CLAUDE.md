@@ -13,7 +13,7 @@ This is an app of the dev.txt™ ecosystem (Windows, C#/WPF), made from the newa
 
 ## Shared files: copied, never edited
 
-`src/Tokens.cs`, `src/Ui.cs` and `src/HubLink.cs` are copies from kit.txt. Do not edit them here, not even to silence a warning. If one needs a change, say so: it is made in kit.txt and brought back with `tools/sync.ps1 <path to kit.txt>`.
+`src/Tokens.cs`, `src/Ui.cs`, `src/HubLink.cs`, `src/Family.cs` and `src/CoreApp.cs` are copies from kit.txt. Do not edit them here, not even to silence a warning. If one needs a change, say so: it is made in kit.txt and brought back with `tools/sync.ps1 <path to kit.txt>`.
 
 ## Language level: C# 5
 
@@ -63,3 +63,4 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 - Never run a real clean, empty the real recycle bin, toggle a real autostart entry or launch a real uninstaller while developing. Use `--selftest`, `--demo` and `--scan-only` (read-only).
 - The only registry write in the app is `Startup.Set` (the `StartupApproved` mark under HKCU). Keep it that way.
 - Not offered on purpose: services, registry cleaning, boosters, drivers, scheduled tasks. See README, «Чего здесь нет и почему».
+- dev.txt apps (`DevApps` in `src/Startup.cs`) are installed, removed and put into autostart by core.txt. While core.txt is installed, metla.txt shows no autostart switch and no «Удалить» for them, only the way to core.txt. Keep it that way (kit.txt `hub/PROTOCOL.md`, «Кто за что отвечает»).

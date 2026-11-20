@@ -2,6 +2,7 @@
 // Автозапуск: запись никогда не удаляется. Переключатель делает то же, что Диспетчер задач, — пишет отметку
 // «включено/отключено» в HKCU\…\Explorer\StartupApproved; вернуть можно и здесь, и в Диспетчере задач.
 // Программы: metla.txt сама ничего не удаляет — только запускает собственную программу удаления (UninstallString).
+// Приложения dev.txt™ (DevApps) ставит, удаляет и включает в автозапуск core.txt: когда он установлен, metla.txt их не трогает.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -46,6 +47,103 @@ namespace DevTxt.Metla
         public bool Editable;         // запись этого пользователя — её можно отключить
         public bool Folder;           // из папки «Автозагрузка» (иначе — из реестра)
         public string ApprovedName;   // имя значения в StartupApproved
+        public bool Family;           // приложение dev.txt: его автозапуском ведает core.txt
+        public bool Missing;          // файла программы нет на месте: запись осталась от удалённой или переехавшей программы
+    }
+
+    // Приложения dev.txt™. Их ставит, удаляет и запускает вместе с Windows core.txt — metla.txt этого не делает,
+    // а отправляет в core.txt (kit.txt, hub/PROTOCOL.md, «Кто за что отвечает»). Здесь только разбор строк: диск не трогается.
+    static class DevApps
+    {
+        // Имена файлов приложений семьи — как в каталоге core.txt и в Family.cs
+        static readonly string[] Names = { "Core", "Kapsula", "Aura", "Dock", "Smena", "Metla" };
+
+        static string LocalAppData { get { return Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData); } }
+
+        // Общий дом: сюда core.txt ставит приложения, здесь лежит и он сам
+        public static string Home { get { return Path.Combine(LocalAppData, "Programs", "dev.txt"); } }
+
+        // aura.txt ставится своим установщиком — в эту папку (так записано в каталоге core.txt)
+        public static string AuraHome { get { return Path.Combine(LocalAppData, "Programs", "aura-voice"); } }
+
+        // Полный путь без кавычек и хвостового разделителя; null — это не путь
+        static string Full(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            try
+            {
+                string p = Environment.ExpandEnvironmentVariables(path.Trim().Trim('"').Trim());
+                if (p.Length == 0 || p.IndexOfAny(Path.GetInvalidPathChars()) >= 0 || !Path.IsPathRooted(p)) return null;
+                return Path.GetFullPath(p).TrimEnd('\\', '/');
+            }
+            catch { return null; }
+        }
+
+        // path — сама папка root или что-то внутри неё
+        public static bool Within(string path, string root)
+        {
+            string p = Full(path), r = Full(root);
+            if (p == null || r == null) return false;
+            return string.Equals(p, r, StringComparison.OrdinalIgnoreCase) || p.StartsWith(r + "\\", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Имя приложения семьи по файлу программы («Kapsula» для …\Kapsula.exe); null — файл называется иначе
+        static string NameOf(string exe)
+        {
+            string f = Full(exe);
+            if (f == null) return null;
+            string file = Path.GetFileName(f);
+            foreach (string n in Names) if (string.Equals(file, n + ".exe", StringComparison.OrdinalIgnoreCase)) return n;
+            return null;
+        }
+
+        // Имя продукта для строки списка: …\Kapsula.exe → «kapsula.txt»; null — файл называется иначе
+        public static string Title(string exe)
+        {
+            string n = NameOf(exe);
+            return n == null ? null : n.ToLowerInvariant() + ".txt";
+        }
+
+        // Запись автозапуска ведёт к приложению dev.txt: файл лежит в общем доме или называется как одно из них.
+        // company — «Компания» из свойств файла (null — пусто или файл не прочитать). У приложений семьи она пустая,
+        // «dev.txt» или имя самого приложения; чужая программа с тем же именем файла (скажем, Aura.exe другой фирмы) не в счёт.
+        public static bool Owns(string exe, string company) { return OwnsIn(exe, company, Home); }
+
+        public static bool OwnsIn(string exe, string company, string home)
+        {
+            if (Within(exe, home)) return true;
+            string name = NameOf(exe);
+            if (name == null) return false;
+            string c = (company ?? "").Trim();
+            return c.Length == 0 || string.Equals(c, "dev.txt", StringComparison.OrdinalIgnoreCase) || string.Equals(c, name, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Установленная программа — приложение dev.txt: раздел реестра dev.txt.<имя> (его пишет core.txt), издатель dev.txt
+        // или её программа удаления, значок либо папка лежат в общем доме или в папке aura.txt
+        public static bool OwnsProgram(string key, string publisher, string[] paths) { return OwnsProgramIn(key, publisher, paths, Home, AuraHome); }
+
+        public static bool OwnsProgramIn(string key, string publisher, string[] paths, string home, string auraHome)
+        {
+            if (key != null && key.Length > 8 && key.StartsWith("dev.txt.", StringComparison.OrdinalIgnoreCase)) return true;
+            if (string.Equals((publisher ?? "").Trim(), "dev.txt", StringComparison.OrdinalIgnoreCase)) return true;
+            if (paths != null) foreach (string p in paths) if (Within(p, home) || Within(p, auraHome)) return true;
+            return false;
+        }
+
+        // Имя продукта для установленного приложения dev.txt: по разделу dev.txt.<имя> или по папке aura.txt
+        // (её установщик пишет своё имя с номером версии); null — не узнать, остаётся имя из реестра
+        public static string ProgramTitle(string key, string[] paths) { return ProgramTitleIn(key, paths, AuraHome); }
+
+        public static string ProgramTitleIn(string key, string[] paths, string auraHome)
+        {
+            if (key != null && key.StartsWith("dev.txt.", StringComparison.OrdinalIgnoreCase))
+            {
+                string id = key.Substring(8).Trim().ToLowerInvariant();
+                if (System.Text.RegularExpressions.Regex.IsMatch(id, "^[a-z][a-z0-9-]{0,31}$")) return id + ".txt";
+            }
+            if (paths != null) foreach (string p in paths) if (Within(p, auraHome)) return "aura.txt";
+            return null;
+        }
     }
 
     static class Startup
@@ -71,10 +169,19 @@ namespace DevTxt.Metla
             catch { return true; }
         }
 
+        // Файла программы нет там, куда ведёт запись. Имя без папки («rundll32.exe …») Windows ищет сама, а путь без
+        // расширения мог обрезаться на пробеле («C:\Program») — такие не в счёт, как и ярлык, который ведёт на папку.
+        public static bool Missing(string exe)
+        {
+            try { return !string.IsNullOrEmpty(exe) && Path.IsPathRooted(exe) && Path.HasExtension(exe) && !File.Exists(exe) && !Directory.Exists(exe); }
+            catch { return false; }
+        }
+
         static void Describe(StartupEntry e)
         {
             try
             {
+                e.Missing = Missing(e.Exe);
                 if (string.IsNullOrEmpty(e.Exe) || !File.Exists(e.Exe)) return;
                 FileVersionInfo v = FileVersionInfo.GetVersionInfo(e.Exe);
                 if (!string.IsNullOrEmpty(v.CompanyName)) e.Publisher = v.CompanyName.Trim();
@@ -100,6 +207,7 @@ namespace DevTxt.Metla
                         using (RegistryKey approvedRoot = RegistryKey.OpenBaseKey(hive == Registry.CurrentUser ? RegistryHive.CurrentUser : RegistryHive.LocalMachine, RegistryView.Default))
                             e.Enabled = ReadApproved(approvedRoot, approvedSub, name);
                         Describe(e);
+                        e.Family = DevApps.Owns(e.Exe, e.Publisher);
                         list.Add(e);
                     }
                 }
@@ -134,6 +242,7 @@ namespace DevTxt.Metla
                     e.Exe = name.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) ? LinkTarget(file) : file;
                     e.Enabled = ReadApproved(approvedHive, "StartupFolder", name);
                     Describe(e);
+                    e.Family = DevApps.Owns(e.Exe, e.Publisher);
                     list.Add(e);
                 }
             }
@@ -170,6 +279,7 @@ namespace DevTxt.Metla
         public System.Windows.Media.ImageSource Icon;   // достаётся в фоне после списка
         public long Bytes = -1;          // −1 — размер неизвестен
         public DateTime? Installed;
+        public bool Family;              // приложение dev.txt: удаляет его core.txt
     }
 
     static class Programs
@@ -191,8 +301,11 @@ namespace DevTxt.Metla
             try { return Convert.ToInt64(o, CultureInfo.InvariantCulture); } catch { return 0; }
         }
 
-        // Запись реестра → программа; null — показывать не нужно: системная часть, обновление или нет своей программы удаления
-        public static Prog FromValues(Dictionary<string, object> v)
+        // Запись реестра → программа; null — показывать не нужно: системная часть, обновление или нет своей программы удаления.
+        // key — имя раздела в реестре: по нему узнаются приложения dev.txt (dev.txt.<имя>)
+        public static Prog FromValues(Dictionary<string, object> v) { return FromValues(v, null); }
+
+        public static Prog FromValues(Dictionary<string, object> v, string key)
         {
             string name = Str(v, "DisplayName"), uninstall = Str(v, "UninstallString");
             if (name == null || uninstall == null) return null;
@@ -213,6 +326,13 @@ namespace DevTxt.Metla
             string date = Str(v, "InstallDate");
             DateTime d;
             if (date != null && DateTime.TryParseExact(date, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) p.Installed = d;
+            // Приложение dev.txt: удаляет его core.txt; в списке — под именем продукта
+            string uexe, uargs;
+            Split(uninstall, out uexe, out uargs);
+            string[] paths = { uexe, p.IconPath, Str(v, "InstallLocation") };
+            p.Family = DevApps.OwnsProgram(key, p.Publisher, paths);
+            string title = p.Family ? DevApps.ProgramTitle(key, paths) : null;
+            if (title != null) p.Name = title;
             return p;
         }
 
@@ -269,7 +389,7 @@ namespace DevTxt.Metla
                                 if (e == null) continue;
                                 var v = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
                                 foreach (string name in e.GetValueNames()) v[name] = e.GetValue(name);
-                                Prog p = FromValues(v);
+                                Prog p = FromValues(v, sub);
                                 if (p != null && seen.Add(p.Name + "|" + p.Version)) list.Add(p);
                             }
                         }

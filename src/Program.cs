@@ -6,6 +6,7 @@
 //   --page имя          какую страницу открыть: обзор | очистка | автозапуск | программы (или overview | cleanup | startup | programs)
 //   --sheet             для снимка: показать вопрос перед очисткой;  --expand id — раскрыть категорию;  --scroll N — прокрутить
 //   --state имя         для снимка в --demo: scan (идёт проверка) | clean (идёт очистка) | done (итог очистки) | loading (списки читаются)
+//   --menu              для снимка: вместо окна — меню своего значка в трее
 //   --scan-only         настоящая проверка только для чтения: печатает итоги по категориям и выходит, ничего не удаляя
 //   --selftest          проверить правила удаления на собственной временной папке, настройки и работу без хаба; код выхода 0 — всё в порядке
 //   --headless          запуститься без окна: только связь с хабом (для проверок протокола)
@@ -88,6 +89,7 @@ namespace DevTxt.Metla
             var w = new MainWindow(demo, page);
             if (shot != null)
             {
+                if (Array.IndexOf(args, "--menu") >= 0) { w.MenuShot(shot, Arg(args, "--state")); return 0; }
                 double scroll;
                 double.TryParse(Arg(args, "--scroll") ?? "0", NumberStyles.Float, CultureInfo.InvariantCulture, out scroll);
                 w.Shot(shot, Array.IndexOf(args, "--sheet") >= 0, Arg(args, "--expand"), scroll, Arg(args, "--state"));
@@ -98,6 +100,7 @@ namespace DevTxt.Metla
             if (!demo || AppHub.TestPort > 0)
             {
                 AppHub.Show = w.ShowWindow;
+                AppHub.Tray = w.TrayItems;   // пункты metla.txt в общем меню трея core.txt
                 AppHub.Start(w.Dispatcher);
             }
             if (!demo)
@@ -142,7 +145,7 @@ namespace DevTxt.Metla
     // Настройки приложения
     static class Prefs
     {
-        public static bool Remind;                 // напоминать, когда можно освободить больше 5 ГБ (тогда приложение остаётся в трее)
+        public static bool Remind;                 // напоминать, когда можно освободить больше 5 ГБ (тогда приложение остаётся в фоне)
         public static DateTime LastAuto;           // когда была последняя ежедневная проверка (UTC)
         public static bool Persist = true;         // false — ничего не писать на диск (--demo)
         public static event Action Changed;        // вызывается в потоке окна

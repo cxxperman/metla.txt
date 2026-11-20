@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Web.Script.Serialization;
+using System.Windows.Threading;
 
 namespace DevTxt.Metla
 {
@@ -40,6 +41,11 @@ namespace DevTxt.Metla
             StartupApproved();
             UninstallEntries();
             HubAndPrefs();
+            DevAppsChecks();
+            TrayAndFamily();
+            TrayHoldChecks();
+            Reminders();
+            Check(!Safe.Armed && Safe.Fence == null, "deletion is switched off again after every check");
 
             Console.WriteLine(failed == 0 ? "all passed (" + passed + " checks)" : failed + " failed, " + passed + " passed");
             return failed == 0 ? 0 : 1;
@@ -310,6 +316,10 @@ namespace DevTxt.Metla
             Check(Approved.Decode(new byte[] { 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }) && !Approved.Decode(new byte[] { 7, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 0 }), "the marks Windows itself writes (06, 07) are understood");
             Check(Throws(delegate { Startup.Set(new StartupEntry { Name = "x", ApprovedName = "x", Editable = false }, false); }), "shared entries cannot be switched");
             Check(Startup.ExeOf(@"""C:\Program Files\App\app.exe"" --tray") == @"C:\Program Files\App\app.exe" && Startup.ExeOf(@"C:\Program Files\App\app.exe -silent") == @"C:\Program Files\App\app.exe", "the program is found in a start command");
+            string gone = Path.Combine(Path.GetTempPath(), "metla-no-such-" + Process.GetCurrentProcess().Id, "app.exe");
+            Check(Startup.Missing(gone) && !Startup.Missing(Process.GetCurrentProcess().MainModule.FileName), "an entry whose program file is gone is noticed");
+            Check(!Startup.Missing("rundll32.exe") && !Startup.Missing(null) && !Startup.Missing(""), "a bare file name is found by Windows itself and is not «missing»");
+            Check(!Startup.Missing(@"C:\Program") && !Startup.Missing(Path.GetTempPath()), "a path cut at a space and a folder are not «missing»");
         }
 
         static Dictionary<string, object> Entry(params object[] pairs)
@@ -417,6 +427,138 @@ namespace DevTxt.Metla
             var link = new HubLink(Program.Id, Program.Name, Program.VersionText, 9);
             Check(!Throws(delegate { link.Start(); link.State(AppHub.Topic, AppHub.Settings()); link.Command("core", "show", null); Thread.Sleep(300); link.Stop(); }), "no hub — nothing throws");
             Check(!link.Online, "no hub — the app is simply offline");
+        }
+
+        // ───────── Приложения dev.txt: в автозапуске и в программах ими ведает core.txt ─────────
+        static void DevAppsChecks()
+        {
+            const string Home = @"C:\Users\вы\AppData\Local\Programs\dev.txt", Aura = @"C:\Users\вы\AppData\Local\Programs\aura-voice";
+            Check(DevApps.OwnsIn(Home + @"\Core.exe", null, Home) && DevApps.OwnsIn(Home + @"\Kapsula\Kapsula.exe", "", Home) && DevApps.OwnsIn(Home + @"\Arkada\Tool.exe", "Кто-то ещё", Home), "anything in the dev.txt home is a dev.txt app");
+            Check(DevApps.OwnsIn(@"C:\Users\вы\AppData\Local\Kapsula\Kapsula.exe", null, Home) && DevApps.OwnsIn(Aura + @"\Aura.exe", "Aura", Home) && DevApps.OwnsIn(@"D:\Apps\SMENA.EXE", "dev.txt", Home) && DevApps.OwnsIn(@"E:\dock\Dock.exe", null, Home) && DevApps.OwnsIn(@"C:\x\Metla.exe", null, Home), "a dev.txt file name anywhere is a dev.txt app (core.txt finds autostart entries the same way)");
+            Check(!DevApps.OwnsIn(@"C:\Program Files (x86)\ASUS\AURA\Aura.exe", "ASUSTeK COMPUTER INC.", Home) && !DevApps.OwnsIn(@"C:\Games\Core.exe", "Другая студия", Home), "a program of another company with the same file name is not ours");
+            Check(!DevApps.OwnsIn(@"C:\Program Files\Discord\Update.exe", "Discord Inc.", Home) && !DevApps.OwnsIn(@"C:\Tools\MyCore.exe", null, Home) && !DevApps.OwnsIn(@"C:\Tools\Core.exe.bak", null, Home) && !DevApps.OwnsIn(Home + @"2\Tool.exe", null, Home), "other programs, similar names and a sibling folder are not dev.txt apps");
+            Check(!DevApps.OwnsIn(null, null, Home) && !DevApps.OwnsIn("", null, Home) && !DevApps.OwnsIn("Core.exe", null, Home) && !DevApps.OwnsIn(@"C:\a<b\Core.exe", null, Home), "empty, relative and broken paths are not dev.txt apps");
+            Check(DevApps.OwnsIn("\"" + Home + "\\Core.exe\"", null, Home) && DevApps.OwnsIn(Home.ToUpperInvariant() + @"\TOOL.EXE", "x", Home), "quotes and letter case do not matter");
+            Check(DevApps.Owns(@"%LOCALAPPDATA%\Programs\dev.txt\Tool\Tool.exe", "Кто-то ещё") && DevApps.Within(DevApps.Home, DevApps.Home), "environment variables are expanded; the real home is %LOCALAPPDATA%\\Programs\\dev.txt");
+            Check(DevApps.Title(Home + @"\Kapsula\Kapsula.exe") == "kapsula.txt" && DevApps.Title(@"C:\x\AURA.exe") == "aura.txt" && DevApps.Title(@"C:\x\Discord.exe") == null && DevApps.Title(null) == null, "dev.txt apps are listed under their product names");
+
+            // Автозапуск: пока core.txt установлен, у приложений dev.txt своя группа и нет переключателя
+            var list = new List<StartupEntry>
+            {
+                new StartupEntry { Name = "core.txt", Editable = true, Family = true },
+                new StartupEntry { Name = "Discord", Editable = true },
+                new StartupEntry { Name = "Aura", Editable = false, Family = true },
+                new StartupEntry { Name = "Realtek", Editable = false }
+            };
+            List<StartupEntry> mine = new List<StartupEntry>(), fam = new List<StartupEntry>(), shared = new List<StartupEntry>();
+            StartupPage.Split(list, true, mine, fam, shared);
+            Check(mine.Count == 1 && mine[0].Name == "Discord" && fam.Count == 2 && fam[0].Name == "core.txt" && shared.Count == 1 && shared[0].Name == "Realtek", "with core.txt installed dev.txt apps get their own group");
+            mine.Clear(); fam.Clear(); shared.Clear();
+            StartupPage.Split(list, false, mine, fam, shared);
+            Check(mine.Count == 2 && fam.Count == 0 && shared.Count == 2, "without core.txt they are like any other program");
+            Check(!MainWindow.CanToggle(list[0], true) && MainWindow.CanToggle(list[0], false) && MainWindow.CanToggle(list[1], true) && !MainWindow.CanToggle(list[3], false), "no switch for a dev.txt app while core.txt is installed; shared entries never switch");
+
+            // Программы: приложения dev.txt удаляет core.txt
+            Prog kapsula = Programs.FromValues(Entry("DisplayName", "kapsula.txt", "Publisher", "dev.txt", "DisplayVersion", "0.8.4", "UninstallString", "\"" + DevApps.Home + "\\Core.exe\" --uninstall kapsula", "DisplayIcon", DevApps.Home + @"\Kapsula\Kapsula.exe"), "dev.txt.kapsula");
+            Check(kapsula != null && kapsula.Family && kapsula.Name == "kapsula.txt", "core.txt's uninstall entry (dev.txt.<id>) is a dev.txt app");
+            Prog bare = Programs.FromValues(Entry("DisplayName", "Smena", "UninstallString", @"C:\x\u.exe"), "dev.txt.smena");
+            Check(bare != null && bare.Family && bare.Name == "smena.txt", "the key name alone is enough, and it gives the product name");
+            Prog aura = Programs.FromValues(Entry("DisplayName", "Aura 0.26.2", "Publisher", "Aura", "DisplayVersion", "0.26.2", "UninstallString", "\"" + DevApps.AuraHome + "\\Uninstall Aura.exe\" /currentuser", "DisplayIcon", DevApps.AuraHome + @"\uninstallerIcon.ico"), "5266ef77-3896-53f2-9a95-f401976d665b");
+            Check(aura != null && aura.Family && aura.Name == "aura.txt" && aura.Version == "0.26.2", "aura.txt's own installer entry is found by its folder and listed under the product name");
+            Prog other = Programs.FromValues(Entry("DisplayName", "Aura Sync", "Publisher", "ASUSTeK", "UninstallString", @"C:\Program Files (x86)\ASUS\AURA\unins000.exe", "DisplayIcon", @"C:\Program Files (x86)\ASUS\AURA\Aura.exe"), "{ABC}");
+            Check(other != null && !other.Family && other.Name == "Aura Sync", "a program of another company is not a dev.txt app, even with an Aura.exe inside");
+            Check(!Programs.FromValues(Entry("DisplayName", "Игра", "UninstallString", "x.exe"), "dev.txt").Family && !Programs.FromValues(Entry("DisplayName", "Игра", "UninstallString", "x.exe", "Publisher", "dev.txt games"), "devtxt.kapsula").Family && !Programs.FromValues(Entry("DisplayName", "Игра", "UninstallString", "x.exe")).Family, "similar keys and publishers are not dev.txt apps");
+            Check(DevApps.OwnsProgramIn(null, null, new string[] { @"C:\D\dev.txt\Smena\Smena.exe" }, @"C:\D\dev.txt", @"C:\D\aura-voice") && !DevApps.OwnsProgramIn(null, null, new string[] { null, "", @"C:\D\aura-voice2\x.exe", @"C:\D\dev.txt2\y.exe" }, @"C:\D\dev.txt", @"C:\D\aura-voice"), "paths in the dev.txt home or the aura.txt folder count, neighbours do not");
+            Check(!MainWindow.CanUninstall(kapsula, true) && MainWindow.CanUninstall(kapsula, false) && MainWindow.CanUninstall(other, true), "dev.txt apps are removed in core.txt while it is installed; other programs — by their own uninstaller");
+        }
+
+        // ───────── Один значок в трее, metla.tray и связь с семьёй (без сети) ─────────
+        static void TrayAndFamily()
+        {
+            Check(!MainWindow.OwnTray(false, false, false, false, false), "no reminder — no own tray icon");
+            Check(!MainWindow.OwnTray(true, true, true, false, false) && !MainWindow.OwnTray(true, true, true, true, false), "core.txt holds the family's one tray icon — ours is hidden");
+            Check(MainWindow.OwnTray(true, false, false, false, false) && MainWindow.OwnTray(true, false, true, false, false), "no core.txt, or it keeps no icon — ours is shown");
+            Check(!MainWindow.OwnTray(true, false, false, true, false) && MainWindow.OwnTray(true, false, true, true, false), "just started: wait for core.txt's word, but show at once when it says it keeps no icon");
+            Check(MainWindow.OwnTray(true, true, true, false, true) && MainWindow.OwnTray(true, false, false, true, true), "an own Windows notification shows the icon for its time, even while core.txt holds the tray");
+            Check(!MainWindow.OwnTray(false, false, false, false, true), "no reminder — no icon, notification or not");
+
+            bool shown = false, scanned = false;
+            List<TrayItem> items = MainWindow.TrayMenu(false, delegate { shown = true; }, delegate { scanned = true; });
+            Check(items.Count >= 1 && items.Count <= Family.MaxTray && items[0].Key == "show" && items[0].Label == "Открыть" && items[0].Check == null, "metla.tray: «Открыть» first, at most four items");
+            var forbidden = new HashSet<string> { "autostart", "startup", "update", "updates", "focus", "dnd", "core", "exit", "quit", "clean" };
+            Check(items.TrueForAll(delegate(TrayItem t) { return !forbidden.Contains(t.Key) && !t.Label.Contains("metla") && !t.Label.Contains("Очист") && !t.Label.Contains("Удал"); }), "no common and no cleaning items in metla.tray, and no app name in the labels");
+            Check(items.Exists(delegate(TrayItem t) { return t.Key == "scan" && t.Label == "Проверить диск" && t.Enabled; }) && !MainWindow.TrayMenu(true, null, null).Find(delegate(TrayItem t) { return t.Key == "scan"; }).Enabled, "«Проверить диск» is there and unavailable while work is going on");
+            var data = MainWindow.TrayMenu(true, null, null)[1].ToData();
+            Check(data.ContainsKey("enabled") && !(bool)data["enabled"] && !data.ContainsKey("check"), "an unavailable item says enabled: false and has no tick");
+
+            // Связь, собранная как в AppHub.Start, но не запущенная: Family дописал своё, tray.run доходит до пункта
+            AppHub.Tray = delegate { return MainWindow.TrayMenu(false, delegate { shown = true; }, delegate { scanned = true; }); };
+            try
+            {
+                Family fam;
+                HubLink l = AppHub.Wire(9, out fam);
+                Check(Array.IndexOf(l.Commands, "settings.set") >= 0 && Array.IndexOf(l.Commands, "show") >= 0 && Array.IndexOf(l.Commands, "tray.run") >= 0, "commands: settings.set, show, tray.run");
+                Check(Array.IndexOf(l.Topics, "hub.theme") >= 0 && Array.IndexOf(l.Topics, "core.family") >= 0 && Array.IndexOf(l.Topics, "hub.apps") >= 0, "topics: hub.theme, core.family, hub.apps");
+                l.OnCommand("tray.run", HubLink.Msg("key", "scan"), "core");
+                Check(scanned && !shown, "tray.run scan reaches «Проверить диск»");
+                l.OnCommand("tray.run", HubLink.Msg("key", "show"), "core");
+                Check(shown, "tray.run show opens the window");
+                Check(Throws(delegate { l.OnCommand("tray.run", HubLink.Msg("key", "clean"), "core"); }), "an unknown tray item is refused");
+                fam.SetTray(MainWindow.TrayMenu(true, null, delegate { scanned = false; }));
+                scanned = true;
+                Check(Throws(delegate { l.OnCommand("tray.run", HubLink.Msg("key", "scan"), "core"); }) && scanned, "an unavailable tray item is refused and does nothing");
+                l.OnState("core.family", HubLink.Msg("tray", true, "focus", true, "game", true), "core");
+                Check(!fam.HideOwnTray && !fam.Focus && !fam.Game && !fam.IslandOnline && !fam.Notify("metla.txt", "x", true), "without a live link nothing is hidden or held back, and there is no island");
+            }
+            finally { AppHub.Tray = null; }
+        }
+
+        // ───────── Ожидание слова core.txt после запуска: кончается по своему таймеру, а не по часам ─────────
+        static void TrayHoldChecks()
+        {
+            var hold = new TrayHold(TimeSpan.FromMilliseconds(40));   // audit:ok — короткое ожидание для проверки, не движение
+            int over = 0;
+            DispatcherFrame frame = null;
+            hold.Over = delegate { over++; if (frame != null) frame.Continue = false; };
+            Check(!hold.Waiting, "the startup hold is off until it starts");
+            hold.Start();
+            Check(hold.Waiting && !MainWindow.OwnTray(true, false, false, hold.Waiting, false), "while it holds, the own icon waits for core.txt");
+            Pump(ref frame, 3000);
+            Check(over == 1 && !hold.Waiting, "the hold ends by its own timer, once: fired " + over);
+            Check(MainWindow.OwnTray(true, false, false, hold.Waiting, false), "core.txt never answered — after the hold the own icon is shown");
+            hold.Start();
+            hold.Stop();
+            Pump(ref frame, 150);
+            Check(over == 1 && !hold.Waiting, "a stopped hold (the link dropped) stays off and does not fire later");
+        }
+
+        // Крутит очередь потока, пока кадр не остановят или не выйдет время
+        static void Pump(ref DispatcherFrame frame, int ms)
+        {
+            var f = new DispatcherFrame();
+            frame = f;
+            var guard = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(ms) };
+            guard.Tick += delegate { guard.Stop(); f.Continue = false; };
+            guard.Start();
+            Dispatcher.PushFrame(f);
+            guard.Stop();
+            frame = null;
+        }
+
+        // ───────── Напоминание: остров, своё уведомление, «Не беспокоить» и игра ─────────
+        static void Reminders()
+        {
+            int asked = 0;
+            Func<bool> yes = delegate { asked++; return true; }, no = delegate { asked++; return false; };
+            Check(!Reminder.Quiet(true, false, false, yes) && asked == 0, "with core.txt online its word decides; the own full-screen check is not run");
+            Check(Reminder.Quiet(true, true, false, no) && Reminder.Quiet(true, false, true, no) && asked == 0, "do-not-disturb or a game from core.txt hold the reminder back");
+            Check(Reminder.Quiet(false, false, false, yes) && !Reminder.Quiet(false, false, false, no) && asked == 2, "without core.txt a full-screen window in front holds it back");
+            Check(!Reminder.Quiet(false, false, false, null), "nothing to check — not quiet");
+            Check(Reminder.Way(false, true, false, true, true) == RemindWay.Island && Reminder.Way(false, true, false, true, false) == RemindWay.Island, "the island goes first");
+            Check(Reminder.Way(false, true, false, false, true) == RemindWay.Balloon, "without the island — the own Windows notification, also while core.txt holds the tray (the icon shows just for it)");
+            Check(Reminder.Way(false, true, true, true, true) == RemindWay.Wait && Reminder.Way(false, true, true, false, true) == RemindWay.Wait, "do-not-disturb or a game: the reminder waits, not dropped");
+            Check(Reminder.Way(false, true, false, false, false) == RemindWay.Wait, "no own icon at all and no island: it waits");
+            Check(Reminder.Way(true, true, false, true, true) == RemindWay.Drop && Reminder.Way(false, false, false, true, true) == RemindWay.Drop, "an open window or nothing to free: no reminder");
         }
     }
 }

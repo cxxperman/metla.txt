@@ -549,12 +549,14 @@ namespace DevTxt.Metla
     }
 
     // «Автозапуск»: что запускается вместе с Windows. Свои записи можно отключить, общие — только посмотреть.
+    // Приложения dev.txt включает и выключает core.txt, пока он установлен: у них вместо переключателя — дорога туда.
     class StartupPage : Page
     {
         readonly LoadBox load = new LoadBox(new Thickness(4, 2, 4, 14));
         readonly StackPanel body = new StackPanel();
         readonly List<KeyValuePair<StartupEntry, Switch>> switches = new List<KeyValuePair<StartupEntry, Switch>>();
         List<StartupEntry> built;   // для какого списка построены строки
+        bool core;                  // core.txt был установлен, когда строились строки
 
         public StartupPage(MainWindow w) : base(w)
         {
@@ -564,13 +566,16 @@ namespace DevTxt.Metla
 
         public override Panel Entrance { get { return body; } }
 
-        void Entry(StartupEntry entry)
+        // managed — приложение dev.txt, а core.txt установлен: переключателя нет, только «включено» или «отключено»
+        void Entry(StartupEntry entry, bool managed)
         {
             StartupEntry e = entry;
-            // Понятное имя из файла программы; имя значения в реестре остаётся в подсказке
-            string name = string.IsNullOrEmpty(e.Description) ? e.Name : e.Description;
+            // Понятное имя из файла программы (у приложений dev.txt — имя продукта); имя значения в реестре остаётся в подсказке
+            string name = e.Family ? DevApps.Title(e.Exe) : null;
+            if (name == null) name = string.IsNullOrEmpty(e.Description) ? e.Name : e.Description;
             Border tile = IconTile(name, e.Icon, 36);
-            string hint = string.IsNullOrEmpty(e.Publisher) ? e.Command : e.Publisher;
+            // Файла нет на месте — запись осталась от удалённой или переехавшей программы: так и сказано
+            string hint = e.Missing ? "Файл программы не найден" : string.IsNullOrEmpty(e.Publisher) ? e.Command : e.Publisher;
             var left = new DockPanel { LastChildFill = true, Background = Brushes.Transparent };
             DockPanel.SetDock(tile, Dock.Left);
             left.Children.Add(tile);
@@ -580,7 +585,7 @@ namespace DevTxt.Metla
             left.ToolTip = (name != e.Name ? "Запись: " + e.Name + "\n" : "") + e.Command;
 
             FrameworkElement control;
-            if (e.Editable)
+            if (!managed && MainWindow.CanToggle(e, core))
             {
                 var sw = new Switch(e.Enabled, delegate(bool on) { w.ToggleStartup(e, on); });
                 switches.Add(new KeyValuePair<StartupEntry, Switch>(e, sw));
@@ -589,23 +594,47 @@ namespace DevTxt.Metla
             else
             {
                 control = Ui.T(e.Enabled ? "включено" : "отключено", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
-                left.Opacity = 0.6;
+                if (!managed) left.Opacity = 0.6;   // общие для всех — только для просмотра
             }
             Row(body, left, control);
+        }
+
+        // Кто в какой группе: свои, приложения dev.txt (пока core.txt установлен) и общие для всех пользователей
+        internal static void Split(List<StartupEntry> all, bool coreInstalled, List<StartupEntry> mine, List<StartupEntry> family, List<StartupEntry> shared)
+        {
+            foreach (StartupEntry e in all)
+            {
+                if (coreInstalled && e.Family) family.Add(e);
+                else if (e.Editable) mine.Add(e);
+                else shared.Add(e);
+            }
         }
 
         void Build()
         {
             built = w.StartupItems;
+            core = w.CoreInstalled;
             body.Children.Clear();
             switches.Clear();
             if (built == null) return;
-            List<StartupEntry> mine = built.FindAll(delegate(StartupEntry e) { return e.Editable; });
-            List<StartupEntry> shared = built.FindAll(delegate(StartupEntry e) { return !e.Editable; });
+            var mine = new List<StartupEntry>();
+            var family = new List<StartupEntry>();
+            var shared = new List<StartupEntry>();
+            Split(built, core, mine, family, shared);
 
             Title(body, "Запускается для вас");
-            if (mine.Count == 0) Row(body, Text("Здесь пусто", "Для вашей учётной записи вместе с Windows ничего не запускается", false));
-            foreach (StartupEntry e in mine) Entry(e);
+            if (mine.Count == 0) Row(body, Text("Здесь пусто", family.Count > 0 ? "Кроме приложений dev.txt, для вашей учётной записи вместе с Windows ничего не запускается" : "Для вашей учётной записи вместе с Windows ничего не запускается", false));
+            foreach (StartupEntry e in mine) Entry(e, false);
+
+            if (family.Count > 0)
+            {
+                // Одна строка на всю группу — дорога в core.txt, как у настроек, которые показывает он
+                Title(body, "Приложения dev.txt");
+                var open = new Btn();
+                open.Set("Открыть core.txt", null, true, delegate { w.OpenCore("general"); });
+                Row(body, Text("Управляется в core.txt", "Их запуск вместе с Windows включается и выключается в core.txt, в разделе «Общие»", true), open.Root);
+                foreach (StartupEntry e in family) Entry(e, true);
+            }
 
             if (shared.Count > 0)
             {
@@ -613,20 +642,22 @@ namespace DevTxt.Metla
                 var note = Ui.T("Только для просмотра: они меняются в Диспетчере задач с правами администратора.", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
                 note.TextWrapping = TextWrapping.Wrap; note.Margin = new Thickness(4, -4, 4, 10);
                 body.Children.Add(note);
-                foreach (StartupEntry e in shared) Entry(e);
+                foreach (StartupEntry e in shared) Entry(e, false);
             }
         }
 
         public void Update()
         {
             load.Set(w.LoadingStartup, w.StartupItems == null);
-            if (built != w.StartupItems) Build();
+            // Новый список — или core.txt поставили или удалили, пока список открыт: у приложений dev.txt другие строки
+            if (built != w.StartupItems || core != w.CoreInstalled) Build();
             // Переключатель показывает то, что получилось на самом деле (после ошибки возвращается назад)
             foreach (KeyValuePair<StartupEntry, Switch> p in switches) p.Value.Value = p.Key.Enabled;
         }
     }
 
     // «Программы»: список установленного, поиск и порядок. «Удалить» запускает собственную программу удаления.
+    // Приложения dev.txt удаляет core.txt, пока он установлен: у них вместо «Удалить» — «Открыть core.txt».
     class ProgramsPage : Page
     {
         public readonly ScrollViewer Scroll;
@@ -639,6 +670,8 @@ namespace DevTxt.Metla
         Border nothing;
         List<Prog> built;   // для какого списка построены строки
         int order = Programs.BySize;
+        double slot = 84;   // ширина места под действие справа — одна во всех строках, чтобы размер и дата стояли ровным столбцом
+        bool core;          // core.txt был установлен, когда строились строки
 
         public ProgramsPage(MainWindow w) : base(w)
         {
@@ -673,10 +706,21 @@ namespace DevTxt.Metla
         {
             string hint = p.Publisher ?? "";
             if (!string.IsNullOrEmpty(p.Version)) hint += (hint == "" ? "" : " · ") + "версия " + p.Version;
+            // Приложение dev.txt удаляет core.txt: вместо «Удалить» — тихая подпись, а на строке под курсором — «Открыть core.txt»
+            bool managed = !MainWindow.CanUninstall(p, core);
             var b = new Btn();
-            b.Set("Удалить", null, true, delegate { w.AskUninstall(p); });
-            b.Root.MinWidth = 84;
+            if (managed) b.Set("Открыть core.txt", null, true, delegate { w.OpenCore("apps"); });
+            else { b.Set("Удалить", null, true, delegate { w.AskUninstall(p); }); b.Root.MinWidth = 84; }
+            b.Root.HorizontalAlignment = HorizontalAlignment.Right;
             b.Root.Visibility = Visibility.Hidden;   // место занято всегда, кнопка видна только на строке под курсором или в фокусе
+            var cell = new Grid { Width = slot, Children = { b.Root } };
+            TextBlock note = null;
+            if (managed)
+            {
+                note = Ui.T("Удаляется в core.txt", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
+                note.HorizontalAlignment = HorizontalAlignment.Right; note.VerticalAlignment = VerticalAlignment.Center;
+                cell.Children.Add(note);
+            }
             TextBlock date = Side(p.Installed.HasValue ? p.Installed.Value.ToString("d MMM yyyy", Ru) : "—", 96, Ui.Label3, Tokens.Size.Caption);
             TextBlock size = Side(p.Bytes >= 0 ? Fmt.Size(p.Bytes) : "—", 76, Ui.Label2, Tokens.Size.Body);
             Border tile = IconTile(p.Name, p.Icon, 32);
@@ -686,18 +730,19 @@ namespace DevTxt.Metla
             left.Children.Add(tile);
             left.Children.Add(Text(p.Name, hint, false));
             var holder = new StackPanel();
-            Border row = Row(holder, left, b.Root, date, size);
+            Border row = Row(holder, left, cell, date, size);
             holder.Children.Clear();
             Action sync = delegate
             {
                 bool on = row.IsMouseOver || row.IsKeyboardFocusWithin;
                 b.Root.Visibility = on ? Visibility.Visible : Visibility.Hidden;
+                if (note != null) note.Visibility = on ? Visibility.Hidden : Visibility.Visible;
                 row.Background = row.IsMouseOver ? Ui.GlassHover : Ui.CardFill;
             };
             row.MouseEnter += delegate { sync(); };
             row.MouseLeave += delegate { sync(); };
             row.IsKeyboardFocusWithinChanged += delegate { sync(); };
-            Ui.Keyboard(row, delegate { w.AskUninstall(p); });
+            Ui.Keyboard(row, delegate { if (managed) w.OpenCore("apps"); else w.AskUninstall(p); });
             return row;
         }
 
@@ -706,6 +751,16 @@ namespace DevTxt.Metla
             built = w.Progs;
             rows.Clear();
             tiles.Clear();
+            slot = 84;
+            core = w.CoreInstalled;
+            if (built != null && built.Exists(delegate(Prog p) { return !MainWindow.CanUninstall(p, core); }))
+            {
+                // «Открыть core.txt» шире «Удалить»: место под действие во всех строках — по ней
+                var probe = new Btn();
+                probe.Set("Открыть core.txt", null, true, null);
+                probe.Root.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                slot = Math.Max(slot, Math.Ceiling(probe.Root.DesiredSize.Width));
+            }
             if (built != null) foreach (Prog p in built) rows[p] = MakeRow(p);
             Arrange();
         }
@@ -735,7 +790,7 @@ namespace DevTxt.Metla
         public void Update()
         {
             load.Set(w.LoadingProgs, w.Progs == null);
-            if (built != w.Progs) Build();
+            if (built != w.Progs || core != w.CoreInstalled) Build();   // и когда core.txt поставили или удалили
         }
     }
 
@@ -784,10 +839,12 @@ namespace DevTxt.Metla
 
             w.StartupItems = new List<StartupEntry>
             {
-                new StartupEntry { Name = "core.txt", Publisher = "dev.txt", Command = @"""C:\Users\вы\AppData\Local\dev.txt\Core.exe"" --tray", Editable = true, Enabled = true },
+                new StartupEntry { Name = "core.txt", Publisher = "dev.txt", Command = @"""C:\Users\вы\AppData\Local\Programs\dev.txt\Core.exe"" --tray", Exe = @"C:\Users\вы\AppData\Local\Programs\dev.txt\Core.exe", Editable = true, Enabled = true, Family = true },
                 new StartupEntry { Name = "Discord", Publisher = "Discord Inc.", Command = @"""C:\Users\вы\AppData\Local\Discord\Update.exe"" --processStart Discord.exe", Editable = true, Enabled = true },
                 new StartupEntry { Name = "Steam", Description = "Steam Client Bootstrapper", Publisher = "Valve Corporation", Command = @"""C:\Program Files (x86)\Steam\steam.exe"" -silent", Editable = true, Enabled = false },
                 new StartupEntry { Name = "Заметки", Command = @"C:\Users\вы\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Заметки.lnk", Editable = true, Enabled = true, Folder = true },
+                new StartupEntry { Name = "Помощник печати", Command = @"""C:\Program Files\Печать\helper.exe"" /tray", Exe = @"C:\Program Files\Печать\helper.exe", Editable = true, Enabled = true, Missing = true },
+                new StartupEntry { Name = "Kapsula", Description = "Kapsula", Command = @"""C:\Users\вы\AppData\Local\Programs\dev.txt\Kapsula\Kapsula.exe""", Exe = @"C:\Users\вы\AppData\Local\Programs\dev.txt\Kapsula\Kapsula.exe", Editable = true, Enabled = true, Family = true },
                 new StartupEntry { Name = "SecurityHealth", Description = "Windows Security notification icon", Publisher = "Microsoft Corporation", Command = @"%windir%\system32\SecurityHealthSystray.exe", Enabled = true },
                 new StartupEntry { Name = "RtkAudUService", Description = "Realtek HD Audio Universal Service", Publisher = "Realtek Semiconductor", Command = @"""C:\Windows\System32\RtkAudUService64.exe"" -background", Enabled = true }
             };
@@ -797,6 +854,8 @@ namespace DevTxt.Metla
                 new Prog { Name = "Видеоредактор", Publisher = "Монтаж", Version = "19.1", Bytes = 4617089843, Installed = new DateTime(2026, 9, 2), Uninstall = "demo" },
                 new Prog { Name = "Офисный пакет", Publisher = "Документы и таблицы", Version = "24.8.2", Bytes = 2040109465, Installed = new DateTime(2025, 12, 20), Uninstall = "demo" },
                 new Prog { Name = "Браузер", Publisher = "Открытый веб", Version = "131.0", Bytes = 734003200, Installed = new DateTime(2026, 11, 10), Uninstall = "demo" },
+                new Prog { Name = "aura.txt", Publisher = "dev.txt", Version = "0.27.4", Bytes = 641728512, Installed = new DateTime(2026, 11, 15), Uninstall = "demo", Family = true },
+                new Prog { Name = "kapsula.txt", Publisher = "dev.txt", Version = "0.8.4", Bytes = 2936012, Installed = new DateTime(2026, 11, 12), Uninstall = "demo", Family = true },
                 new Prog { Name = "Мессенджер", Publisher = "Связь", Version = "5.6.3", Bytes = 412316860, Installed = new DateTime(2026, 10, 28), Uninstall = "demo" },
                 new Prog { Name = "Архиватор", Publisher = "Сжатие", Version = "24.08", Bytes = 5662310, Installed = new DateTime(2025, 6, 1), Uninstall = "demo" },
                 new Prog { Name = "Драйвер принтера", Publisher = "Печать", Version = "3.2", Bytes = -1, Installed = null, Uninstall = "demo" }
