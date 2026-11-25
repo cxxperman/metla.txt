@@ -4,7 +4,7 @@
 //   --demo              выдуманное состояние; диск, реестр и сеть не трогаются, удаление выключено
 //   --shot файл.png     нарисовать окно в файл и выйти (обычно вместе с --demo)
 //   --page имя          какую страницу открыть: обзор | очистка | автозапуск | программы (или overview | cleanup | startup | programs)
-//   --sheet             для снимка: показать вопрос перед очисткой;  --expand id — раскрыть категорию;  --scroll N — прокрутить
+//   --sheet [bin]       для снимка: показать вопрос перед очисткой (bin — только про корзину, как по show {page:"bin"});  --expand id — раскрыть категорию;  --scroll N — прокрутить
 //   --state имя         для снимка в --demo: scan (идёт проверка) | clean (идёт очистка) | done (итог очистки) | loading (списки читаются)
 //   --menu              для снимка: вместо окна — меню своего значка в трее
 //   --scan-only         настоящая проверка только для чтения: печатает итоги по категориям и выходит, ничего не удаляя
@@ -92,7 +92,8 @@ namespace DevTxt.Metla
                 if (Array.IndexOf(args, "--menu") >= 0) { w.MenuShot(shot, Arg(args, "--state")); return 0; }
                 double scroll;
                 double.TryParse(Arg(args, "--scroll") ?? "0", NumberStyles.Float, CultureInfo.InvariantCulture, out scroll);
-                w.Shot(shot, Array.IndexOf(args, "--sheet") >= 0, Arg(args, "--expand"), scroll, Arg(args, "--state"));
+                string sheet = Array.IndexOf(args, "--sheet") < 0 ? null : Arg(args, "--sheet") == "bin" ? "bin" : "clean";
+                w.Shot(shot, sheet, Arg(args, "--expand"), scroll, Arg(args, "--state"));
                 return 0;
             }
 
@@ -100,6 +101,8 @@ namespace DevTxt.Metla
             if (!demo || AppHub.TestPort > 0)
             {
                 AppHub.Show = w.ShowWindow;
+                AppHub.ShowAt = w.ShowAt;    // show с args.page: "scan" | "startup"
+                if (!demo) AppHub.Bin = BinSource.Real();   // в --demo о настоящей корзине в хаб не сообщается
                 AppHub.Quit = w.QuitApp;     // «Закрыть» в трее core.txt
                 AppHub.Tray = w.TrayItems;   // пункты metla.txt в общем меню трея core.txt
                 AppHub.Start(w.Dispatcher);

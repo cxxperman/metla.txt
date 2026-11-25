@@ -1,6 +1,7 @@
 // metla.txt. AppHub.cs — связь с core.txt, лаунчером dev.txt™. Он держит на этом компьютере хаб (127.0.0.1:42080).
 // Приложение отдаёт туда повседневную настройку (напоминание) и итог последней проверки («metla.found»),
 // принимает оттуда изменения и общий вид: «Меньше движения» для всех приложений разом.
+// Для дока dock.txt — корзина Windows: «metla.bin» (сколько в ней лежит) и команда bin.open (Bin.cs).
 // Семья (Family.cs): пока core.txt держит общий значок в трее, своего у metla.txt нет — её пункты («Открыть», «Проверить диск»)
 // стоят в меню core.txt (metla.tray); напоминание уходит на остров kapsula.txt; «Не беспокоить» и игру сообщает core.txt.
 // core.txt может быть не запущен — это нормально: приложение работает само и тихо пробует подключиться снова.
@@ -14,16 +15,19 @@ namespace DevTxt.Metla
 {
     static class AppHub
     {
-        public const string Topic = Program.Id + ".settings", FoundTopic = Program.Id + ".found";
+        public const string Topic = Program.Id + ".settings", FoundTopic = Program.Id + ".found", BinTopic = Program.Id + ".bin";
 
         static HubLink link;
         static Family family;
         static Dispatcher ui;
         static int published;
         static Dictionary<string, object> found;   // итог последней проверки; до первой проверки состояния нет
+        static BinWatch bin;                        // корзина для дока («metla.bin», bin.open); null — не следим (--demo)
 
         public static Action Quit;                  // закрыть metla.txt: «Закрыть» в трее core.txt, пока своего значка нет
         public static Action Show;                  // показать окно: команда «show» от другого приложения
+        public static Action<string> ShowAt;        // то же, но на странице из args.page: "scan", "startup" или "bin" (см. PageArg)
+        public static BinSource Bin;                // откуда числа о корзине; задаёт Program, в --demo — null
         public static Func<IList<TrayItem>> Tray;   // пункты metla.txt для общего меню трея core.txt — берутся при запуске связи
         public static event Action StatusChanged;   // связь появилась или пропала; вызывается в потоке окна
         public static event Action FamilyChanged;   // core.family или hub.apps поменялись, связь пропала; вызывается в потоке окна
@@ -89,6 +93,22 @@ namespace DevTxt.Metla
             return HubLink.Msg("bytes", bytes, "at", atUtc.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture));
         }
 
+        // Страница из args.page команды show: "scan" — что занимает место, "startup" — автозапуск,
+        // "bin" — вопрос про очистку корзины (обычный лист с числами; удаляет только «Удалить» в нём); иное — null (окно как обычно)
+        public static string PageArg(Dictionary<string, object> args)
+        {
+            object v;
+            if (args == null || !args.TryGetValue("page", out v)) return null;
+            string p = v as string;
+            return p == "scan" || p == "startup" || p == "bin" ? p : null;
+        }
+
+        // Для проверок: следить за подменённой корзиной вместо настоящей
+        internal static BinWatch BinWatcher { get { return bin; } set { bin = value; } }
+
+        // Корзину очистили в самом окне — пересчитать и прислать новое «metla.bin»
+        public static void BinChanged() { if (bin != null) bin.Poke(); }
+
         // После каждой проверки: сколько можно освободить и когда это посчитано
         public static void Found(long bytes, DateTime atUtc)
         {
@@ -102,7 +122,7 @@ namespace DevTxt.Metla
         {
             var l = new HubLink(Program.Id, Program.Name, Program.VersionText, port);
             l.Topics = new string[] { "hub.theme" };
-            l.Commands = new string[] { "settings.set", "show" };
+            l.Commands = new string[] { "settings.set", "show", "bin.open" };   // команды, которая чистит, нет и не будет (CLAUDE.md)
             l.OnCommand = Command;
             l.OnState = delegate(string topic, object data, string from)
             {
@@ -123,6 +143,13 @@ namespace DevTxt.Metla
             if (d != null) d.BeginInvoke(a);
         }
 
+        // Выполнить в потоке окна и дождаться; окна нет (проверки) — прямо здесь
+        static void OnUiNow(Action a)
+        {
+            Dispatcher d = ui;
+            if (d == null || d.CheckAccess()) a(); else d.Invoke(a);
+        }
+
         public static void Start(Dispatcher dispatcher)
         {
             if (link != null) return;
@@ -132,10 +159,19 @@ namespace DevTxt.Metla
             link.Start();
             Publish();                  // хаба ещё нет — клиент запомнит и повторит после подключения
             if (found != null) link.State(FoundTopic, found);
+            if (Bin != null && bin == null)
+            {
+                HubLink l = link;
+                bin = new BinWatch(Bin, delegate(Dictionary<string, object> d) { l.State(BinTopic, d); });
+                bin.Start(true);   // в потоке окна: уведомления оболочки приходят в его очередь
+                BinWatch w = bin;
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate { try { w.Recount(); } catch { } });   // первое число — сразу, но не в потоке окна
+            }
         }
 
         public static void Stop()
         {
+            if (bin != null) bin.Stop();
             if (link != null) link.Stop();
         }
 
@@ -148,12 +184,25 @@ namespace DevTxt.Metla
         // Приходит в фоновом потоке
         static object Command(string name, Dictionary<string, object> args, string from)
         {
+            // Открыть корзину — в этом же фоновом потоке: окно для этого не нужно
+            if (name == "bin.open")
+            {
+                if (bin == null) throw new Exception("корзина недоступна");
+                bin.Open();
+                return null;
+            }
             Exception failed = null;
-            ui.Invoke(new Action(delegate
+            OnUiNow(delegate
             {
                 try
                 {
-                    if (name == "show") { if (Show != null) Show(); return; }
+                    if (name == "show")
+                    {
+                        string page = PageArg(args);
+                        if (page != null && ShowAt != null) ShowAt(page);
+                        else if (Show != null) Show();
+                        return;
+                    }
                     object key, value;
                     args.TryGetValue("key", out key);
                     args.TryGetValue("value", out value);
@@ -162,7 +211,7 @@ namespace DevTxt.Metla
                     finally { if (published == before) Publish(); }   // core.txt ждёт полную картину, даже если ничего не изменилось
                 }
                 catch (Exception e) { failed = e; }
-            }));
+            });
             if (failed != null) throw failed;
             return null;
         }

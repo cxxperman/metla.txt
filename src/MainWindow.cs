@@ -39,6 +39,7 @@ namespace DevTxt.Metla
         internal List<StartupEntry> StartupItems;  // null — ещё не читали
         internal List<Prog> Progs;
         internal string Notice;                    // последняя ошибка — показывается в строке состояния до следующего удачного действия
+        internal string Info;                      // короткое спокойное сообщение в строке состояния («Корзина пуста…»); гаснет при следующем действии
         internal bool LoadingStartup, LoadingProgs;
 
         readonly TextBlock footer = Ui.T("", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
@@ -122,7 +123,7 @@ namespace DevTxt.Metla
             {
                 if (firstScanDone) return;
                 firstScanDone = true;
-                if (!Scanned && !Busy) StartScan();
+                if (!Scanned && !Busy && !sheetOpen) StartScan();   // открыли сразу с вопросом про корзину — проверка после него
             };
             Activated += delegate
             {
@@ -198,6 +199,7 @@ namespace DevTxt.Metla
         internal void ShowPage(int i)
         {
             page = i;
+            Info = null;
             shell.Selected = i;
             shell.Title(Titles[i][0], Titles[i][1]);
             overview.Root.Visibility = i == POverview ? Visibility.Visible : Visibility.Collapsed;
@@ -255,6 +257,7 @@ namespace DevTxt.Metla
             long chosen = Scanner.Chosen(Cats, out files);
             string line;
             if (Notice != null) line = Notice;
+            else if (Info != null && !Busy) line = Info;
             else if (page == PStartup) line = LoadingStartup || StartupItems == null ? "Читаю список…" : "Отключённое можно включить обратно здесь или в Диспетчере задач" + (ManagedStartup ? ", а приложения dev.txt — в core.txt" : "");
             else if (page == PPrograms) line = Progs == null ? "Читаю список…" : "Программ: " + Fmt.Count(Progs.Count) + " · каждую удаляет её собственная программа удаления" + (ManagedProgs ? ", а приложения dev.txt — core.txt" : "");
             else if (Busy) line = BusyLine();
@@ -307,7 +310,7 @@ namespace DevTxt.Metla
         internal async void StartScan()
         {
             if (Busy) return;
-            Notice = null;
+            Notice = null; Info = null;
             Last = null;
             if (DemoMode) { Demo.Scan(this); FinishScan(true); return; }
             Busy = true;
@@ -348,13 +351,33 @@ namespace DevTxt.Metla
         void AskClean()
         {
             if (Busy || !Scanned) return;
+            Info = null;
             // Корзина могла измениться после проверки — в вопросе должны стоять числа на эту секунду
             Category bin = Scanner.Find(Cats, "recycle");
             if (!DemoMode && bin != null && bin.Chosen) { Scanner.Scan(bin, Env.Real()); RenderAll(); }
 
             // Снимок выбора: в листе показано ровно это, и удалено будет ровно это — что бы ни стало с переключателями потом
-            List<Category> cats = Cats;
-            HashSet<string> ids = Scanner.Snapshot(cats);
+            Ask(Cats, Scanner.Snapshot(Cats));
+        }
+
+        // Команда show с { page: "bin" } (корзина в доке): тот же вопрос, но только про корзину.
+        // Остальные категории и выбор в окне не трогаются. Корзина пуста — вопроса нет, только строка внизу.
+        internal void AskBin()
+        {
+            if (Busy || sheetOpen) return;
+            Info = null;
+            Category bin = Scanner.Find(Cats, "recycle");
+            if (bin == null) return;
+            if (!DemoMode) Scanner.Scan(bin, Env.Real());   // числа на эту секунду
+            HashSet<string> ids = Scanner.BinSnapshot(Cats);
+            if (ids.Count == 0) Info = "Корзина пуста — удалять нечего";
+            RenderAll();
+            if (ids.Count > 0) Ask(Cats, ids);
+        }
+
+        // Лист с вопросом: в нём ровно снимок ids, и очищено будет ровно это (DoClean получает тот же снимок)
+        void Ask(List<Category> cats, HashSet<string> ids)
+        {
             long total = 0, files = 0;
             var body = new StackPanel();
             bool anyPermanent = false, recycle = false;
@@ -375,7 +398,9 @@ namespace DevTxt.Metla
             var note = Ui.T(warn, Tokens.Size.Caption, Ui.Label2, FontWeights.Normal);
             note.TextWrapping = TextWrapping.Wrap; note.Margin = new Thickness(0, 14, 0, 0);
             body.Children.Add(note);
-            OpenSheet("Удалить выбранное?", body, "Удалить " + Fmt.Size(total), Tokens.Palette.Red, delegate { DoClean(cats, ids); });
+            // Только корзина (кнопка «Очистить корзину…» в доке или выбрана одна она) — так лист и называется
+            string title = ids.Count == 1 && ids.Contains("recycle") ? "Очистить корзину?" : "Удалить выбранное?";
+            OpenSheet(title, body, "Удалить " + Fmt.Size(total), Tokens.Palette.Red, delegate { DoClean(cats, ids); });
         }
 
         static FrameworkElement SheetLine(string name, string count, string size, bool strong)
@@ -397,7 +422,7 @@ namespace DevTxt.Metla
         async void DoClean(List<Category> cats, HashSet<string> ids)
         {
             if (Busy) return;
-            Notice = null;
+            Notice = null; Info = null;
             if (DemoMode) { Last = Demo.Clean(this, ids); FinishScan(false); return; }
             Busy = true;
             Cleaning = true;
@@ -420,6 +445,7 @@ namespace DevTxt.Metla
                     });
                 }
                 catch (Exception e) { Notice = "Очистка остановилась: " + e.Message; }
+                if (r != null && r.RecycleEmptied) AppHub.BinChanged();   // док увидит пустую корзину, не дожидаясь Windows
                 // После очистки — новая проверка: числа на экране должны быть настоящими
                 Cleaning = false;
                 BusyText = "Проверяю, что осталось…";
@@ -480,6 +506,9 @@ namespace DevTxt.Metla
         {
             if (!sheetOpen) return;
             sheetOpen = false;
+            // Окно открыли сразу с вопросом (корзина из дока) и проверки ещё не было — она начнётся после листа.
+            // Отложено: если лист закрыт «Удалить», очистка успеет начаться первой, и проверка не помешает ей
+            if (!DemoMode && firstScanDone && !Scanned) Dispatcher.BeginInvoke(new Action(delegate { if (!Scanned && !Busy && !sheetOpen) StartScan(); }));
             sheetCancel = null;
             sheetCard = null;
             int token = ++sheetToken;
@@ -716,6 +745,16 @@ namespace DevTxt.Metla
             StartScan();
         }
 
+        // Команда show с args.page (см. AppHub.PageArg): "scan" — как «Проверить диск», "startup" — окно на «Автозапуске»,
+        // "bin" — окно и сразу вопрос про очистку одной корзины (AskBin)
+        public void ShowAt(string where)
+        {
+            if (where == "scan") { ScanFromTray(); return; }
+            ShowWindow();
+            if (where == "startup" && !sheetOpen && page != PStartup) ShowPage(PStartup);
+            else if (where == "bin") AskBin();
+        }
+
         void DropTray()
         {
             noticeEnd.Stop();
@@ -860,14 +899,15 @@ namespace DevTxt.Metla
         }
 
         // Рисует окно в файл PNG, не показывая его на экране. state — выдуманное состояние для снимка (см. DemoState)
-        public void Shot(string file, bool sheet, string expand, double scroll, string state)
+        public void Shot(string file, string sheet, string expand, double scroll, string state)
         {
             DemoState(state);
             if (expand != null) clean.Expand(expand);
             var root = (FrameworkElement)Content;
             Content = null;
             RenderAll();
-            if (sheet) AskClean();
+            if (sheet == "clean") AskClean();
+            else if (sheet == "bin") AskBin();
             root.Measure(new Size(W, H));
             root.Arrange(new Rect(0, 0, W, H));
             root.UpdateLayout();

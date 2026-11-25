@@ -436,6 +436,15 @@ namespace DevTxt.Metla
             foreach (var c in list) if (c.Chosen) ids.Add(c.Id);
             return ids;
         }
+
+        // Снимок для вопроса только про корзину (корзина в доке): одна корзина, если в ней что-то есть, —
+        // независимо от переключателей в окне; остальные категории в него не попадают никогда
+        public static HashSet<string> BinSnapshot(List<Category> list)
+        {
+            var ids = new HashSet<string>();
+            foreach (var c in list) if (c.IsRecycle && c.Cleanable && c.Bytes + c.Count > 0) ids.Add(c.Id);
+            return ids;
+        }
     }
 
     // Итог по одной категории — для разбивки после очистки

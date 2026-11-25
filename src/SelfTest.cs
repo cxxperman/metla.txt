@@ -43,6 +43,7 @@ namespace DevTxt.Metla
             HubAndPrefs();
             DevAppsChecks();
             TrayAndFamily();
+            BinChecks();
             TrayHoldChecks();
             Reminders();
             Check(!Safe.Armed && Safe.Fence == null, "deletion is switched off again after every check");
@@ -511,6 +512,88 @@ namespace DevTxt.Metla
                 Check(!fam.HideOwnTray && !fam.Focus && !fam.Game && !fam.IslandOnline && !fam.Notify("metla.txt", "x", true), "without a live link nothing is hidden or held back, and there is no island");
             }
             finally { AppHub.Tray = null; }
+        }
+
+        // ───────── Корзина для дока: metla.bin, bin.open, show с page (bin — обычный вопрос), команды очистки нет — на подменённой корзине ─────────
+        static void BinChecks()
+        {
+            // Формат: оба поля, целые; пустая — нули; отрицательное не уходит
+            var d = BinWatch.Data(3, 4096);
+            Check(d.Count == 2 && d["count"] is long && d["bytes"] is long && (long)d["count"] == 3 && (long)d["bytes"] == 4096, "metla.bin is { count, bytes } as integers");
+            var zero = BinWatch.Data(0, 0);
+            Check((long)zero["count"] == 0 && (long)zero["bytes"] == 0 && (long)BinWatch.Data(-1, -5)["bytes"] == 0, "an empty bin is { 0, 0 }; nothing negative");
+            string json = new JavaScriptSerializer().Serialize(d);
+            Check(json == "{\"count\":3,\"bytes\":4096}", "metla.bin travels as plain numbers, got " + json);
+
+            // Подмена корзины: настоящая не трогается
+            long count = 5, bytes = 1000;
+            int opened = 0;
+            var src = new BinSource();
+            src.Query = delegate { return new long[] { Interlocked.Read(ref count), Interlocked.Read(ref bytes) }; };
+            src.Open = delegate { opened++; };
+            var sent = new List<Dictionary<string, object>>();
+            var w = new BinWatch(src, delegate(Dictionary<string, object> x) { lock (sent) sent.Add(x); });
+            w.Start(false);
+            try
+            {
+                w.Recount(); w.Recount();
+                Check(sent.Count == 1 && (long)sent[0]["count"] == 5 && (long)sent[0]["bytes"] == 1000, "metla.bin goes out once while nothing changes, sent " + sent.Count);
+                Interlocked.Exchange(ref bytes, 1500);
+                w.Recount();
+                Check(sent.Count == 2 && (long)sent[1]["bytes"] == 1500, "a new size is sent again");
+
+                // Дребезг: сотня уведомлений подряд — один пересчёт после тишины
+                int before = w.Recounts;
+                for (int i = 0; i < 200; i++) w.Poke();
+                Thread.Sleep(BinWatch.QuietMs / 2);
+                Check(w.Recounts == before, "no recount while notifications keep coming");
+                Thread.Sleep(BinWatch.QuietMs + 600);
+                Check(w.Recounts == before + 1, "a burst of notifications gives one recount, got " + (w.Recounts - before));
+
+                // Корзину очистили (в окне metla.txt) — после пересчёта уходит { 0, 0 }
+                Interlocked.Exchange(ref count, 0); Interlocked.Exchange(ref bytes, 0);
+                w.Recount();
+                var last = sent[sent.Count - 1];
+                Check(sent.Count == 3 && (long)last["count"] == 0 && (long)last["bytes"] == 0, "an emptied bin is sent as { 0, 0 }");
+
+                // Через команды хаба: связь не запущена, корзина — подменённая
+                AppHub.BinWatcher = w;
+                Family fam;
+                HubLink l = AppHub.Wire(9, out fam);
+                Check(Array.IndexOf(l.Commands, "bin.open") >= 0, "bin.open is declared");
+                Check(Array.TrueForAll(l.Commands, delegate(string c) { return c != "bin.empty" && !c.Contains("clean") && !c.Contains("empty") && !c.Contains("delete"); }), "no hub command cleans (CLAUDE.md)");
+                Check(Throws(delegate { l.OnCommand("bin.empty", new Dictionary<string, object>(), "dock"); }), "bin.empty is refused");
+                Check(l.OnCommand("bin.open", new Dictionary<string, object>(), "dock") == null && opened == 1, "bin.open opens the bin and answers null");
+                src.Open = delegate { throw new InvalidOperationException("x"); };
+                Check(Throws(delegate { l.OnCommand("bin.open", new Dictionary<string, object>(), "dock"); }), "bin.open failure is refused");
+
+                // show с page: scan и startup — на свою страницу, незнакомая или без page — окно как обычно
+                Check(AppHub.PageArg(HubLink.Msg("page", "scan")) == "scan" && AppHub.PageArg(HubLink.Msg("page", "startup")) == "startup", "show understands page scan and startup");
+                Check(AppHub.PageArg(HubLink.Msg("page", "nope")) == null && AppHub.PageArg(HubLink.Msg("page", 5)) == null && AppHub.PageArg(new Dictionary<string, object>()) == null && AppHub.PageArg(null) == null, "an unknown or missing page is ignored");
+                int plain = 0; string at = null;
+                AppHub.Show = delegate { plain++; };
+                AppHub.ShowAt = delegate(string p) { at = p; };
+                Check(!Throws(delegate { l.OnCommand("show", HubLink.Msg("page", "nope"), "dock"); }) && plain == 1 && at == null, "show with an unknown page just opens the window");
+                l.OnCommand("show", HubLink.Msg("page", "startup"), "dock");
+                Check(at == "startup" && plain == 1, "show with page startup goes to that page");
+                l.OnCommand("show", HubLink.Msg("page", "bin"), "dock");
+                Check(at == "bin" && plain == 1, "show with page bin goes to the recycle-bin question");
+
+                // Вопрос про корзину: в снимке ровно корзина, что бы ни было выбрано в окне
+                List<Category> cats = Scanner.Categories();
+                foreach (Category c in cats) { c.Bytes = 100; c.Count = 1; c.On = true; }
+                Scanner.Find(cats, "recycle").On = false;
+                HashSet<string> ids = Scanner.BinSnapshot(cats);
+                Check(ids.Count == 1 && ids.Contains("recycle"), "the bin question snapshots exactly the recycle bin, switched off or not");
+                Check(Scanner.Find(cats, "temp").On && !Scanner.Find(cats, "recycle").On, "the choice in the window is not touched");
+                Scanner.Find(cats, "recycle").Bytes = 0; Scanner.Find(cats, "recycle").Count = 0;
+                Check(Scanner.BinSnapshot(cats).Count == 0, "an empty bin gives no question");
+            }
+            finally
+            {
+                AppHub.BinWatcher = null; AppHub.Show = null; AppHub.ShowAt = null;
+                w.Stop();
+            }
         }
 
         // ───────── Ожидание слова core.txt после запуска: кончается по своему таймеру, а не по часам ─────────
